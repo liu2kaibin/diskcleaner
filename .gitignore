@@ -1,1 +1,22 @@
+# Rust build artifacts
 target/
+**/*.rs.bk
+*.pdb
+
+# Local environment & IDE files
+.idea/
+.vscode/
+*.sublime-workspace
+*.suo
+*.user
+
+# Local runtime data & caches (zero machine data leak)
+*.json.bak
+.diskcleaner-snapshot.json
+.diskcleaner-settings.json
+.diskcleaner-trash/
+
+# Ephemeral scratch logs
+.scratch/*.log
+.scratch/*.txt
+.scratch/recon*

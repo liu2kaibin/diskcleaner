@@ -1,7 +1,0 @@
-6.3M	/c/Users/admin/AppData/Roaming/Code/Cache
-10K	/c/Users/admin/.ollama
-5.7M	/c/Users/admin/.claude
-13G	/c/Users/admin/Downloads
-0	/c/Windows/Temp
-40M	/c/Windows/SoftwareDistribution/Download
-RECON_DONE
