@@ -755,60 +755,57 @@ impl App {
         let bottom_height = 86.0;
         let scroll_height = (ui.available_height() - bottom_height).max(120.0);
 
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), scroll_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    // 分组 1: Safe to remove
-                    if !safe_indices.is_empty() {
-                        Self::section_header(
+        egui::ScrollArea::vertical()
+            .max_height(scroll_height)
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                // 分组 1: Safe to remove
+                if !safe_indices.is_empty() {
+                    Self::section_header(
+                        ui,
+                        "Safe to remove",
+                        egui::Color32::from_rgb(0xDC, 0xFC, 0xE7),
+                        egui::Color32::from_rgb(0x16, 0xA3, 0x4A),
+                        &human_size(safe_total),
+                    );
+                    ui.add_space(4.0);
+
+                    for &idx in &safe_indices {
+                        let finding = &self.findings[idx];
+                        Self::render_finding_row(
                             ui,
-                            "Safe to remove",
-                            egui::Color32::from_rgb(0xDC, 0xFC, 0xE7),
-                            egui::Color32::from_rgb(0x16, 0xA3, 0x4A),
-                            &human_size(safe_total),
+                            &mut self.selected_indices,
+                            &mut self.expanded_indices,
+                            idx,
+                            finding,
                         );
-                        ui.add_space(4.0);
-
-                        for &idx in &safe_indices {
-                            let finding = &self.findings[idx];
-                            Self::render_finding_row(
-                                ui,
-                                &mut self.selected_indices,
-                                &mut self.expanded_indices,
-                                idx,
-                                finding,
-                            );
-                        }
-                        ui.add_space(10.0);
                     }
+                    ui.add_space(10.0);
+                }
 
-                    // 分组 2: Review first
-                    if !review_indices.is_empty() {
-                        Self::section_header(
+                // 分组 2: Review first
+                if !review_indices.is_empty() {
+                    Self::section_header(
+                        ui,
+                        "Review first",
+                        egui::Color32::from_rgb(0xFE, 0xF3, 0xC7),
+                        egui::Color32::from_rgb(0xD9, 0x77, 0x06),
+                        &human_size(review_total),
+                    );
+                    ui.add_space(4.0);
+
+                    for &idx in &review_indices {
+                        let finding = &self.findings[idx];
+                        Self::render_finding_row(
                             ui,
-                            "Review first",
-                            egui::Color32::from_rgb(0xFE, 0xF3, 0xC7),
-                            egui::Color32::from_rgb(0xD9, 0x77, 0x06),
-                            &human_size(review_total),
+                            &mut self.selected_indices,
+                            &mut self.expanded_indices,
+                            idx,
+                            finding,
                         );
-                        ui.add_space(4.0);
-
-                        for &idx in &review_indices {
-                            let finding = &self.findings[idx];
-                            Self::render_finding_row(
-                                ui,
-                                &mut self.selected_indices,
-                                &mut self.expanded_indices,
-                                idx,
-                                finding,
-                            );
-                        }
                     }
-                });
-            },
-        );
+                }
+            });
 
         ui.separator();
 
@@ -824,9 +821,13 @@ impl App {
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
+            let total_w = ui.available_width();
+            let select_safe_w = (total_w * 0.42).max(100.0);
+            let copy_w = (total_w - select_safe_w - 8.0).max(120.0);
+
             // [Select safe] 按钮
             let select_safe_btn = ui.add_sized(
-                [110.0, 32.0],
+                [select_safe_w, 32.0],
                 egui::Button::new(
                     egui::RichText::new("Select safe")
                         .color(egui::Color32::from_rgb(0x1F, 0x29, 0x37)),
@@ -847,7 +848,7 @@ impl App {
 
             // [Copy script] 主操作按钮（深黑色胶囊底）
             let copy_btn = ui.add_sized(
-                [ui.available_width(), 32.0],
+                [copy_w, 32.0],
                 egui::Button::new(
                     egui::RichText::new("Copy script")
                         .strong()
@@ -920,18 +921,30 @@ impl App {
                         }
                     }
 
-                    ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new(&finding.title)
-                                .strong()
-                                .color(egui::Color32::from_rgb(0x11, 0x18, 0x27)),
-                        );
-                        ui.label(
-                            egui::RichText::new(format_display_path(&finding.path))
-                                .small()
-                                .color(egui::Color32::from_rgb(0x9C, 0xA3, 0xAF)),
-                        );
-                    });
+                    // 为右侧容量与箭头预留 95px，中间标题和路径严格截断，绝不水平撑爆导致整栏错位
+                    let text_w = (ui.available_width() - 95.0).max(60.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(text_w, 36.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&finding.title)
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(0x11, 0x18, 0x27)),
+                                )
+                                .truncate(),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format_display_path(&finding.path))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(0x9C, 0xA3, 0xAF)),
+                                )
+                                .truncate(),
+                            );
+                        },
+                    );
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let arrow = if is_expanded { "v" } else { ">" };
@@ -954,7 +967,7 @@ impl App {
                 if is_expanded {
                     ui.add_space(4.0);
                     ui.separator();
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         match &finding.action {
                             rules::Action::CustomCommand { command, description } => {
                                 ui.colored_label(egui::Color32::from_rgb(0x25, 0x63, 0xEB), "⚡ 维护压缩命令");
@@ -1070,9 +1083,12 @@ impl eframe::App for App {
             ui.add_space(6.0);
         });
 
-        // 右侧建议面板（宽度设为 380px，留出舒适的边距）
+        // 右侧建议面板（支持用户拖拽调整宽度，默认 380px）
         egui::Panel::right("recommendations_panel")
-            .exact_size(380.0)
+            .default_size(380.0)
+            .min_size(320.0)
+            .max_size(600.0)
+            .resizable(true)
             .show(ui, |ui| {
                 self.recommendations_panel(ui);
             });
