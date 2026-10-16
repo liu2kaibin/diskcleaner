@@ -4,9 +4,16 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
-- [ ] 合成 fixture 上 npm cache 规则给出正确分级结论（命中/未命中、大小、类目）
-- [ ] Path Resolver 从环境变量/工具配置解析出缓存真实位置（本机实测：默认位置不存在时也能找到）
-- [ ] 接缝①测试：给定合成快照 → 断言结论清单，纯函数无磁盘 IO
-- [ ] UI 列表显示 npm cache 结论
+- [x] 合成 fixture 上 npm cache 规则给出正确分级结论（命中/未命中、大小、类目）
+- [x] Path Resolver 从环境变量/工具配置解析出缓存真实位置（npm_config_cache / NPM_CONFIG_CACHE / LOCALAPPDATA / USERPROFILE）
+- [x] 接缝①测试：给定合成快照 → 断言结论清单，纯函数无磁盘 IO（11/11 tests pass）
+- [x] UI 列表显示 npm cache 结论（右侧 Recommendations 面板支持卡片展示、标签与依据）
+
+## Comments
+
+- 建立了主测试接缝①：`evaluate_rules(&Snapshot, &PathResolver, &[Box<dyn Rule>]) -> Vec<Finding>` 纯函数管道。
+- `PathResolver` 引入 `EnvLookup` trait，支持注入测试，不污染真实环境变量。
+- `Snapshot::find_node` 实现快速树路径查找。
+- egui 右侧添加 320px Recommendations 面板，展示命中项标题、大小、`● Safe to remove` 绿色标签、绝对路径与删除依据。

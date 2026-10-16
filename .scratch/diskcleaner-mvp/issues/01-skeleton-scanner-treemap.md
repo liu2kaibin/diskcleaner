@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] 启动应用触发用户目录扫描，60 秒内完成（普通权限，不用 MFT）——实测 30.8s / 33.2GB
 - [x] 扫描期间 UI 可交互并显示进度，不冻结（独立线程 + 进度计数 + 人工目验）

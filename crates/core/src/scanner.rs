@@ -40,6 +40,28 @@ pub struct Snapshot {
     pub skipped: u64,
 }
 
+impl Snapshot {
+    /// 在快照树中按绝对路径查找节点。若路径不属于该快照或未扫描到，返回 None。
+    pub fn find_node(&self, path: &Path) -> Option<&Node> {
+        let rel = match path.strip_prefix(&self.root_path) {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+
+        let mut curr = &self.root;
+        for component in rel.components() {
+            let comp_str = component.as_os_str().to_string_lossy();
+            match curr {
+                Node::Dir { children, .. } => {
+                    curr = children.iter().find(|c| c.name() == comp_str)?;
+                }
+                Node::File { .. } => return None,
+            }
+        }
+        Some(curr)
+    }
+}
+
 /// 遍历 `root`，返回聚合大小的快照。阻塞式；调用方负责放线程。
 pub fn scan(root: &Path) -> Snapshot {
     scan_with_progress(root, &AtomicU64::new(0))

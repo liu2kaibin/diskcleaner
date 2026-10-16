@@ -1,11 +1,11 @@
-//! DiskCleaner —— 开发者视角的 Windows 磁盘清理工具（#01 骨架：扫描 + treemap）。
+//! DiskCleaner —— 开发者视角的 Windows 磁盘清理工具（#01 骨架 + #02 规则建议列表）。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Instant;
 
-use diskcleaner_core::{layout, scanner};
+use diskcleaner_core::{layout, rules, scanner};
 use eframe::egui;
 
 fn main() -> eframe::Result {
@@ -57,6 +57,7 @@ enum ScanState {
 
 struct App {
     snapshot: Option<scanner::Snapshot>,
+    findings: Vec<rules::Finding>,
     state: ScanState,
     receiver: Option<Receiver<scanner::Snapshot>>,
     scan_error: Option<String>,
@@ -66,6 +67,7 @@ impl App {
     fn new() -> Self {
         let mut app = Self {
             snapshot: None,
+            findings: Vec::new(),
             state: ScanState::Idle,
             receiver: None,
             scan_error: None,
@@ -81,6 +83,7 @@ impl App {
         let progress_worker = Arc::clone(&progress);
         self.receiver = Some(rx);
         self.scan_error = None;
+        self.findings.clear();
         self.state = ScanState::Scanning { started: Instant::now(), progress };
         std::thread::spawn(move || {
             let snap = scanner::scan_with_progress(std::path::Path::new(&root), &progress_worker);
@@ -92,6 +95,9 @@ impl App {
         if let Some(rx) = &self.receiver {
             match rx.try_recv() {
                 Ok(snap) => {
+                    let resolver = rules::PathResolver::new(&rules::SystemEnv);
+                    let rule_set = rules::default_rules();
+                    self.findings = rules::evaluate_rules(&snap, &resolver, &rule_set);
                     self.snapshot = Some(snap);
                     self.state = ScanState::Idle;
                     self.receiver = None;
@@ -166,6 +172,63 @@ impl App {
         // 占住空间，避免 egui 认为中心面板为空
         ui.allocate_rect(available, egui::Sense::hover());
     }
+
+    fn recommendations_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.heading("Recommendations");
+            ui.label(egui::RichText::new("清理建议").color(egui::Color32::GRAY));
+        });
+        ui.separator();
+
+        if self.findings.is_empty() {
+            if matches!(self.state, ScanState::Scanning { .. }) {
+                ui.label("正在扫描计算中…");
+            } else {
+                ui.label("暂未发现匹配建议项 (npm cache 未在扫描范围)");
+            }
+            return;
+        }
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for finding in &self.findings {
+                egui::Frame::group(ui.style())
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.strong(&finding.title);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.strong(human_size(finding.size));
+                            });
+                        });
+                        ui.horizontal(|ui| {
+                            match finding.risk {
+                                rules::Risk::SafeToRemove => {
+                                    ui.label(
+                                        egui::RichText::new("● Safe to remove")
+                                            .color(egui::Color32::from_rgb(0x22, 0xC5, 0x5E)),
+                                    );
+                                }
+                                rules::Risk::NeedsReview => {
+                                    ui.label(
+                                        egui::RichText::new("● Needs review")
+                                            .color(egui::Color32::from_rgb(0xF5, 0x9E, 0x0B)),
+                                    );
+                                }
+                            }
+                        });
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new(finding.path.to_string_lossy())
+                                .small()
+                                .color(egui::Color32::DARK_GRAY),
+                        );
+                        ui.label(egui::RichText::new(&finding.reason).small());
+                    });
+                ui.add_space(6.0);
+            }
+        });
+    }
 }
 
 impl eframe::App for App {
@@ -214,6 +277,12 @@ impl eframe::App for App {
             });
             ui.add_space(6.0);
         });
+
+        egui::Panel::right("recommendations_panel")
+            .exact_size(320.0)
+            .show(ui, |ui| {
+                self.recommendations_panel(ui);
+            });
 
         egui::CentralPanel::default().show(ui, |ui| match &self.snapshot {
             Some(snap) => Self::treemap(ui, snap),
