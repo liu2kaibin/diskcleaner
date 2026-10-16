@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Instant;
 
-use diskcleaner_core::{category, layout, rules, scanner, script};
+use diskcleaner_core::{category, layout, rules, scanner, script, store};
 use eframe::egui;
 
 fn main() -> eframe::Result {
@@ -78,20 +78,50 @@ struct App {
 impl App {
     fn new() -> Self {
         let drive_stats = scanner::get_disk_free_space("C:\\");
+        let snap_file = store::default_snapshot_path();
+
+        let (init_snap, init_findings, init_selected, toast_msg) =
+            if let Ok(snap) = store::load_snapshot(&snap_file) {
+                let resolver = rules::PathResolver::new(&rules::SystemEnv);
+                let rule_set = rules::default_rules();
+                let findings = rules::evaluate_rules(&snap, &resolver, &rule_set);
+                let mut selected = HashSet::new();
+                for (i, f) in findings.iter().enumerate() {
+                    if f.risk == rules::Risk::SafeToRemove {
+                        selected.insert(i);
+                    }
+                }
+                let ago = format_time_ago(snap.scanned_at_secs);
+                (
+                    Some(snap),
+                    findings,
+                    selected,
+                    Some(format!("已秒开上次快照（扫描于 {ago} 前）")),
+                )
+            } else {
+                (None, Vec::new(), HashSet::new(), None)
+            };
+
+        let needs_initial_scan = init_snap.is_none();
+
         let mut app = Self {
-            snapshot: None,
-            findings: Vec::new(),
-            selected_indices: HashSet::new(),
+            snapshot: init_snap,
+            findings: init_findings,
+            selected_indices: init_selected,
             expanded_indices: HashSet::new(),
             script_config: script::ScriptConfig::default(),
             state: ScanState::Idle,
             receiver: None,
             scan_error: None,
-            toast: None,
+            toast: toast_msg.map(|m| (Instant::now(), m)),
             current_path: Vec::new(),
             drive_stats,
         };
-        app.start_scan();
+
+        if needs_initial_scan {
+            app.start_scan();
+        }
+
         app
     }
 
@@ -102,10 +132,6 @@ impl App {
         let progress_worker = Arc::clone(&progress);
         self.receiver = Some(rx);
         self.scan_error = None;
-        self.findings.clear();
-        self.selected_indices.clear();
-        self.expanded_indices.clear();
-        self.current_path.clear();
         self.drive_stats = scanner::get_disk_free_space("C:\\");
         self.state = ScanState::Scanning { started: Instant::now(), progress };
         std::thread::spawn(move || {
@@ -122,6 +148,9 @@ impl App {
                     let rule_set = rules::default_rules();
                     let findings = rules::evaluate_rules(&snap, &resolver, &rule_set);
 
+                    // 自动持久化新快照到本地磁盘
+                    let _ = store::save_snapshot(&snap, &store::default_snapshot_path());
+
                     // 默认自动勾选全部 Safe to remove 建议项
                     self.selected_indices.clear();
                     for (i, f) in findings.iter().enumerate() {
@@ -134,6 +163,7 @@ impl App {
                     self.snapshot = Some(snap);
                     self.state = ScanState::Idle;
                     self.receiver = None;
+                    self.toast = Some((Instant::now(), "最新扫描快照已保存并生效！".to_string()));
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
@@ -749,18 +779,28 @@ impl eframe::App for App {
                 });
 
                 match (&self.state, &self.snapshot) {
-                    (ScanState::Scanning { started, progress }, _) => {
+                    (ScanState::Scanning { started, progress }, Some(_)) => {
                         let secs = started.elapsed().as_secs();
                         ui.spinner();
                         ui.label(format!(
-                            "扫描中… 已耗时 {secs}s，已访问 {} 项",
+                            "后台重扫中… 已耗时 {secs}s，已访问 {} 项（当前可继续浏览旧快照）",
+                            progress.load(Ordering::Relaxed)
+                        ));
+                        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                    }
+                    (ScanState::Scanning { started, progress }, None) => {
+                        let secs = started.elapsed().as_secs();
+                        ui.spinner();
+                        ui.label(format!(
+                            "首次扫描中… 已耗时 {secs}s，已访问 {} 项",
                             progress.load(Ordering::Relaxed)
                         ));
                         ctx.request_repaint_after(std::time::Duration::from_millis(200));
                     }
                     (ScanState::Idle, Some(snap)) => {
                         ui.label(format!(
-                            "扫描完成：{}，{} 项跳过",
+                            "快照已就绪：扫描于 {} 前（用时 {}，{} 项跳过）",
+                            format_time_ago(snap.scanned_at_secs),
                             human_dur(snap.duration),
                             snap.skipped
                         ));
@@ -878,6 +918,23 @@ fn human_size(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{v:.1} {}", UNITS[unit])
+    }
+}
+
+fn format_time_ago(scanned_at_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(scanned_at_secs);
+    let diff = now.saturating_sub(scanned_at_secs);
+    if diff < 60 {
+        "刚刚".to_string()
+    } else if diff < 3600 {
+        format!("{} 分钟", diff / 60)
+    } else if diff < 86400 {
+        format!("{} 小时", diff / 3600)
+    } else {
+        format!("{} 天", diff / 86400)
     }
 }
 

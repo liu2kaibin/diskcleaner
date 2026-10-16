@@ -4,7 +4,7 @@
 
 **Blocked by:** 04, 05
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] 面板按类目分组显示全部规则命中（分为 Safe to remove 与 Review first 两大独立分组，带胶囊徽标与组容量统计）
 - [x] 每项显示大小与依据（对齐截图格式：[✓] 标题 + 缩略路径 ~/.xxx | 容量 + 右箭头展开详情）

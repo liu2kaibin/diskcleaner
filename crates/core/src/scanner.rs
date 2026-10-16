@@ -4,12 +4,20 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use jwalk::{Parallelism, WalkDirGeneric};
+use serde::{Deserialize, Serialize};
+
+fn default_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// 快照树节点。目录的 size 为子树聚合值。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Node {
     File { name: String, size: u64, mtime: u64 },
     Dir { name: String, size: u64, mtime: u64, children: Vec<Node> },
@@ -54,13 +62,16 @@ impl Node {
 }
 
 /// 一次扫描的产物。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub root_path: PathBuf,
     pub root: Node,
     pub duration: Duration,
     /// 因权限等原因被跳过的条目数（08 号票细化）。
     pub skipped: u64,
+    /// 扫描完成时刻的 Unix 时间戳（秒）
+    #[serde(default = "default_timestamp")]
+    pub scanned_at_secs: u64,
 }
 
 impl Snapshot {
@@ -187,11 +198,14 @@ pub fn scan_with_progress(root: &Path, visited: &AtomicU64) -> Snapshot {
         .unwrap_or_else(|| root.to_string_lossy().into_owned());
     let root_node = build_node(root, &mut raw, root_name);
 
+    let scanned_at_secs = default_timestamp();
+
     Snapshot {
         root_path: root.to_path_buf(),
         root: root_node,
         duration: start.elapsed(),
         skipped,
+        scanned_at_secs,
     }
 }
 

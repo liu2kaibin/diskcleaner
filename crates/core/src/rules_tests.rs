@@ -50,6 +50,7 @@ fn mock_snapshot(root_path: &Path, root_node: Node) -> Snapshot {
         root: root_node,
         duration: Duration::from_millis(50),
         skipped: 0,
+        scanned_at_secs: 1_800_000_000,
     }
 }
 
