@@ -581,27 +581,36 @@ impl Rule for DownloadsOldFilesRule {
         let mut out = Vec::new();
         let dl_path = resolver.resolve_downloads();
         let now = resolver.env.now_secs();
-        if let Some(Node::Dir { children, .. }) = snapshot.find_node(&dl_path) {
-            for c in children {
-                // >180 天 (180 * 86400 = 15,552,000s) 且 >50MB
-                if !matches!(c, Node::Dir { .. })
-                    && c.size() >= 50 * 1024 * 1024
-                    && now.saturating_sub(c.mtime()) >= 180 * 86400
-                {
-                    out.push(Finding {
-                        rule_id: self.id().to_string(),
-                        title: format!("陈旧大文件: {}", c.name()),
-                        path: dl_path.join(c.name()),
-                        size: c.size(),
-                        risk: Risk::NeedsReview,
-                        category: Category::DocumentMedia,
-                        action: Action::MoveToTrash,
-                        reason: "下载目录中超过 180 天未变动的大文件 (>50MB)".to_string(),
-                    });
-                }
-            }
+        if let Some(node) = snapshot.find_node(&dl_path) {
+            scan_downloads_old_files(&dl_path, node, now, &mut out);
         }
         out
+    }
+}
+
+fn scan_downloads_old_files(curr_path: &Path, node: &Node, now: u64, out: &mut Vec<Finding>) {
+    match node {
+        Node::File { name, size, mtime } => {
+            // >180 天 (180 * 86400) 且 >50MB
+            if *size >= 50 * 1024 * 1024 && now.saturating_sub(*mtime) >= 180 * 86400 {
+                let days = now.saturating_sub(*mtime) / 86400;
+                out.push(Finding {
+                    rule_id: "downloads-old-files".to_string(),
+                    title: format!("陈旧大文件: {name}"),
+                    path: curr_path.to_path_buf(),
+                    size: *size,
+                    risk: Risk::NeedsReview,
+                    category: Category::DocumentMedia,
+                    action: Action::MoveToTrash,
+                    reason: format!("下载目录中超过 180 天未变动的大文件（距今 {days} 天，>50MB）"),
+                });
+            }
+        }
+        Node::Dir { children, .. } => {
+            for c in children {
+                scan_downloads_old_files(&curr_path.join(c.name()), c, now, out);
+            }
+        }
     }
 }
 
@@ -612,27 +621,39 @@ impl Rule for DownloadsInstallersRule {
         let mut out = Vec::new();
         let dl_path = resolver.resolve_downloads();
         let now = resolver.env.now_secs();
-        if let Some(Node::Dir { children, .. }) = snapshot.find_node(&dl_path) {
-            for c in children {
-                let lower = c.name().to_lowercase();
-                if (lower.ends_with(".exe") || lower.ends_with(".msi"))
-                    && now.saturating_sub(c.mtime()) >= 90 * 86400
-                    && c.size() > 0
-                {
-                    out.push(Finding {
-                        rule_id: self.id().to_string(),
-                        title: format!("历史安装包: {}", c.name()),
-                        path: dl_path.join(c.name()),
-                        size: c.size(),
-                        risk: Risk::NeedsReview,
-                        category: Category::DevToolOther,
-                        action: Action::MoveToTrash,
-                        reason: "下载目录中超过 90 天的旧软件安装包".to_string(),
-                    });
-                }
-            }
+        if let Some(node) = snapshot.find_node(&dl_path) {
+            scan_downloads_installers(&dl_path, node, now, &mut out);
         }
         out
+    }
+}
+
+fn scan_downloads_installers(curr_path: &Path, node: &Node, now: u64, out: &mut Vec<Finding>) {
+    match node {
+        Node::File { name, size, mtime } => {
+            let lower = name.to_lowercase();
+            if (lower.ends_with(".exe") || lower.ends_with(".msi"))
+                && now.saturating_sub(*mtime) >= 90 * 86400
+                && *size > 0
+            {
+                let days = now.saturating_sub(*mtime) / 86400;
+                out.push(Finding {
+                    rule_id: "downloads-installers".to_string(),
+                    title: format!("历史安装包: {name}"),
+                    path: curr_path.to_path_buf(),
+                    size: *size,
+                    risk: Risk::NeedsReview,
+                    category: Category::DevToolOther,
+                    action: Action::MoveToTrash,
+                    reason: format!("下载目录中超过 90 天的历史安装包（距今 {days} 天）"),
+                });
+            }
+        }
+        Node::Dir { children, .. } => {
+            for c in children {
+                scan_downloads_installers(&curr_path.join(c.name()), c, now, out);
+            }
+        }
     }
 }
 

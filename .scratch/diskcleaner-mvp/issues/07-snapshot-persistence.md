@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] 扫描完成后快照自动保存（自动写入 `%LOCALAPPDATA%\diskcleaner\snapshot.json`，实测生成 21MB 完整快照树）
 - [x] 重启应用秒显上次结果与时间标注（实测 2 秒内秒开，内存占用仅 45MB，顶栏清晰显示“快照已就绪：扫描于 X 分钟前”）

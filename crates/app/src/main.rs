@@ -59,6 +59,18 @@ enum ScanState {
     Scanning { started: Instant, progress: Arc<AtomicU64> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Treemap,
+    Downloads,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadSort {
+    SizeDesc,
+    AgeDesc,
+}
+
 struct App {
     snapshot: Option<scanner::Snapshot>,
     findings: Vec<rules::Finding>,
@@ -73,6 +85,9 @@ struct App {
     current_path: Vec<String>,
     /// 驱动器统计缓存 (total, free)
     drive_stats: Option<(u64, u64)>,
+    /// 视图模式（Treemap 概览 vs Downloads 专项审阅）
+    view_mode: ViewMode,
+    download_sort: DownloadSort,
 }
 
 impl App {
@@ -116,6 +131,8 @@ impl App {
             toast: toast_msg.map(|m| (Instant::now(), m)),
             current_path: Vec::new(),
             drive_stats,
+            view_mode: ViewMode::Treemap,
+            download_sort: DownloadSort::SizeDesc,
         };
 
         if needs_initial_scan {
@@ -378,6 +395,11 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let dl_btn = ui.button("📥 Downloads 专项审阅");
+                if dl_btn.clicked() {
+                    self.view_mode = ViewMode::Downloads;
+                }
+                ui.separator();
                 ui.label(egui::RichText::new(human_size(*curr_size)).color(egui::Color32::GRAY));
                 ui.separator();
                 ui.label(egui::RichText::new("Explorer").strong());
@@ -494,6 +516,179 @@ impl App {
                 ui.add_space(8.0);
             }
         });
+    }
+
+    /// 专项 Downloads 审阅视图（解决 13GB 下载占用）
+    fn downloads_view(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.heading("📥 Downloads 专项审阅");
+            ui.label(
+                egui::RichText::new("陈旧大文件与历史安装包清理")
+                    .small()
+                    .color(egui::Color32::from_rgb(0x6B, 0x72, 0x80)),
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("📊 返回 Treemap 空间图").clicked() {
+                    self.view_mode = ViewMode::Treemap;
+                }
+            });
+        });
+        ui.separator();
+
+        let mut old_files_indices: Vec<usize> = self
+            .findings
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.rule_id == "downloads-old-files")
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut installers_indices: Vec<usize> = self
+            .findings
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.rule_id == "downloads-installers")
+            .map(|(i, _)| i)
+            .collect();
+
+        let old_files_size: u64 = old_files_indices.iter().map(|&i| self.findings[i].size).sum();
+        let installers_size: u64 = installers_indices.iter().map(|&i| self.findings[i].size).sum();
+        let total_dl_cleanable = old_files_size + installers_size;
+
+        // 顶部操作栏：汇总 + 快捷勾选 + 排序
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "可释放总量: {} (陈旧大文件 {} + 历史安装包 {})",
+                    human_size(total_dl_cleanable),
+                    human_size(old_files_size),
+                    human_size(installers_size)
+                ))
+                .strong()
+                .color(egui::Color32::from_rgb(0x1F, 0x29, 0x37)),
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("勾选全部安装包").clicked() {
+                    for &idx in &installers_indices {
+                        self.selected_indices.insert(idx);
+                    }
+                }
+                if ui.button("勾选全部陈旧文件").clicked() {
+                    for &idx in &old_files_indices {
+                        self.selected_indices.insert(idx);
+                    }
+                }
+                ui.separator();
+                if ui.selectable_label(self.download_sort == DownloadSort::AgeDesc, "按时间排序").clicked() {
+                    self.download_sort = DownloadSort::AgeDesc;
+                }
+                if ui.selectable_label(self.download_sort == DownloadSort::SizeDesc, "按大小 ↓").clicked() {
+                    self.download_sort = DownloadSort::SizeDesc;
+                }
+                ui.label("排序:");
+            });
+        });
+        ui.add_space(6.0);
+
+        match self.download_sort {
+            DownloadSort::SizeDesc => {
+                old_files_indices.sort_by(|&a, &b| self.findings[b].size.cmp(&self.findings[a].size));
+                installers_indices.sort_by(|&a, &b| self.findings[b].size.cmp(&self.findings[a].size));
+            }
+            DownloadSort::AgeDesc => {
+                old_files_indices.sort_by(|&a, &b| self.findings[a].title.cmp(&self.findings[b].title));
+                installers_indices.sort_by(|&a, &b| self.findings[a].title.cmp(&self.findings[b].title));
+            }
+        }
+
+        let bottom_legend_h = 32.0;
+        let available_h = (ui.available_height() - bottom_legend_h).max(120.0);
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), available_h),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    // 分组 1: 🕒 超过 180 天未动大文件
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("🕒 超过 180 天未动的大文件 (>50MB)")
+                                .strong()
+                                .color(egui::Color32::from_rgb(0x1F, 0x29, 0x37)),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("({} 项，共 {})", old_files_indices.len(), human_size(old_files_size)))
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                    });
+                    ui.add_space(4.0);
+
+                    if old_files_indices.is_empty() {
+                        ui.label(
+                            egui::RichText::new("（未在 Downloads 目录下检出超过 180 天且 >50MB 的大文件）")
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                    } else {
+                        for &idx in &old_files_indices {
+                            let finding = &self.findings[idx];
+                            Self::render_finding_row(
+                                ui,
+                                &mut self.selected_indices,
+                                &mut self.expanded_indices,
+                                idx,
+                                finding,
+                            );
+                        }
+                    }
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+
+                    // 分组 2: 📦 超过 90 天历史安装包
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("📦 超过 90 天的历史安装包 (.exe / .msi)")
+                                .strong()
+                                .color(egui::Color32::from_rgb(0x1F, 0x29, 0x37)),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("({} 项，共 {})", installers_indices.len(), human_size(installers_size)))
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                    });
+                    ui.add_space(4.0);
+
+                    if installers_indices.is_empty() {
+                        ui.label(
+                            egui::RichText::new("（未在 Downloads 目录下检出超过 90 天的 .exe/.msi 安装包）")
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                    } else {
+                        for &idx in &installers_indices {
+                            let finding = &self.findings[idx];
+                            Self::render_finding_row(
+                                ui,
+                                &mut self.selected_indices,
+                                &mut self.expanded_indices,
+                                idx,
+                                finding,
+                            );
+                        }
+                    }
+                });
+            },
+        );
+
+        ui.add_space(6.0);
+        Self::bottom_legend(ui);
     }
 
     /// 右侧 Recommendations 面板：完整对齐截图交互与布局
@@ -839,15 +1034,16 @@ impl eframe::App for App {
                 self.recommendations_panel(ui);
             });
 
-        // 中心面板：Treemap 与钻取
+        // 中心面板：Treemap 与钻取 或 Downloads 专项审阅
         egui::CentralPanel::default().show(ui, |ui| {
             egui::Frame::group(ui.style())
                 .fill(egui::Color32::WHITE)
                 .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0xE5, 0xE7, 0xEB)))
                 .corner_radius(8.0)
                 .inner_margin(12.0)
-                .show(ui, |ui| {
-                    self.treemap_section(ui);
+                .show(ui, |ui| match self.view_mode {
+                    ViewMode::Treemap => self.treemap_section(ui),
+                    ViewMode::Downloads => self.downloads_view(ui),
                 });
         });
 
