@@ -1,6 +1,6 @@
 # DiskCleaner MVP 规格
 
-Status: ready-for-agent
+Status: completed
 
 ## Problem Statement
 

@@ -4,7 +4,7 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] 四项设置可修改并即时生效（回收目录保留天数、50GB 确认门阈值、90 天闲置天数、直删白名单规则勾选列表）
 - [x] 设置持久化，重启保留（保存于 `%LOCALAPPDATA%\diskcleaner\settings.json`，缺失/损坏自动回退默认，单元测试 5/5 全绿）
