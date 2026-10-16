@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] 脚本头部打印完整清单与总量（清单标明 [直删白名单] 或 [移入回收目录] 及字节大小）
 - [x] 超阈值场景生成确认门（超过 50GB 阈值时插入 Read-Host "YES" 确认门，fixture 5/5 全绿）

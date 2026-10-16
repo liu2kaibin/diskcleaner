@@ -1,8 +1,11 @@
+pub mod category;
 pub mod layout;
 pub mod rules;
 pub mod scanner;
 pub mod script;
 
+#[cfg(test)]
+mod category_tests;
 #[cfg(test)]
 mod layout_tests;
 #[cfg(test)]

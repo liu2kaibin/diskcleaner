@@ -62,6 +62,48 @@ impl Snapshot {
     }
 }
 
+/// 查询指定驱动器（如 "C:\\"）的总容量与可用容量 (total_bytes, free_bytes)。
+pub fn get_disk_free_space(drive: &str) -> Option<(u64, u64)> {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        let wide: Vec<u16> = OsStr::new(drive).encode_wide().chain(Some(0)).collect();
+        let mut free_bytes_available = 0u64;
+        let mut total_number_of_bytes = 0u64;
+        let mut total_number_of_free_bytes = 0u64;
+
+        extern "system" {
+            fn GetDiskFreeSpaceExW(
+                lpDirectoryName: *const u16,
+                lpFreeBytesAvailableToCaller: *mut u64,
+                lpTotalNumberOfBytes: *mut u64,
+                lpTotalNumberOfFreeBytes: *mut u64,
+            ) -> i32;
+        }
+
+        unsafe {
+            let ret = GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_bytes_available,
+                &mut total_number_of_bytes,
+                &mut total_number_of_free_bytes,
+            );
+            if ret != 0 {
+                Some((total_number_of_bytes, total_number_of_free_bytes))
+            } else {
+                None
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = drive;
+        None
+    }
+}
+
 /// 遍历 `root`，返回聚合大小的快照。阻塞式；调用方负责放线程。
 pub fn scan(root: &Path) -> Snapshot {
     scan_with_progress(root, &AtomicU64::new(0))

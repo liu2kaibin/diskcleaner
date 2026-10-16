@@ -17,6 +17,7 @@ pub enum Risk {
 pub enum Category {
     PackageCache,
     BuildArtifact,
+    CodeProject,
     AiModel,
     Sdk,
     DocumentMedia,

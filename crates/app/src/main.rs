@@ -1,18 +1,20 @@
-//! DiskCleaner —— 开发者视角的 Windows 磁盘清理工具（#01 骨架 + #02 规则建议 + #04 脚本生成闭环）。
+//! DiskCleaner —— 开发者视角的 Windows 磁盘清理工具
+//! #01 骨架 + #02 规则建议 + #04 脚本生成闭环 + #03 语义类目着色、顶部四统计卡、treemap钻取
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Instant;
 
-use diskcleaner_core::{layout, rules, scanner, script};
+use diskcleaner_core::{category, layout, rules, scanner, script};
 use eframe::egui;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 800.0])
+            .with_inner_size([1320.0, 840.0])
             .with_title("DiskCleaner"),
         ..Default::default()
     };
@@ -20,6 +22,7 @@ fn main() -> eframe::Result {
         "DiskCleaner",
         options,
         Box::new(|cc| {
+            cc.egui_ctx.set_visuals(egui::Visuals::light());
             install_cjk_font(cc);
             Ok(Box::new(App::new()))
         }),
@@ -65,10 +68,15 @@ struct App {
     receiver: Option<Receiver<scanner::Snapshot>>,
     scan_error: Option<String>,
     toast: Option<(Instant, String)>,
+    /// 下钻路径栈（空代表根目录，如 ["Desktop", "project1"]）
+    current_path: Vec<String>,
+    /// 驱动器统计缓存 (total, free)
+    drive_stats: Option<(u64, u64)>,
 }
 
 impl App {
     fn new() -> Self {
+        let drive_stats = scanner::get_disk_free_space("C:\\");
         let mut app = Self {
             snapshot: None,
             findings: Vec::new(),
@@ -78,6 +86,8 @@ impl App {
             receiver: None,
             scan_error: None,
             toast: None,
+            current_path: Vec::new(),
+            drive_stats,
         };
         app.start_scan();
         app
@@ -92,9 +102,11 @@ impl App {
         self.scan_error = None;
         self.findings.clear();
         self.selected_indices.clear();
+        self.current_path.clear();
+        self.drive_stats = scanner::get_disk_free_space("C:\\");
         self.state = ScanState::Scanning { started: Instant::now(), progress };
         std::thread::spawn(move || {
-            let snap = scanner::scan_with_progress(std::path::Path::new(&root), &progress_worker);
+            let snap = scanner::scan_with_progress(Path::new(&root), &progress_worker);
             let _ = tx.send(snap);
         });
     }
@@ -138,14 +150,216 @@ impl App {
             .sum()
     }
 
-    fn treemap(ui: &mut egui::Ui, snapshot: &scanner::Snapshot) {
-        let scanner::Node::Dir { children, .. } = &snapshot.root else {
-            ui.label("扫描结果不是目录");
+    /// 获取当前下钻层级对应的节点引用
+    fn get_current_node<'a>(&self, snapshot: &'a scanner::Snapshot) -> &'a scanner::Node {
+        let mut curr = &snapshot.root;
+        for seg in &self.current_path {
+            match curr {
+                scanner::Node::Dir { children, .. } => {
+                    if let Some(child) = children.iter().find(|c| c.name() == seg) {
+                        curr = child;
+                    } else {
+                        break;
+                    }
+                }
+                scanner::Node::File { .. } => break,
+            }
+        }
+        curr
+    }
+
+    /// 顶部 4 张统计卡（参考截图）
+    fn top_stats_bar(&mut self, ui: &mut egui::Ui) {
+        let selected_size = self.selected_total_size();
+        let (total_drive, free_drive) = self.drive_stats.unwrap_or((0, 0));
+        let free_after = free_drive + selected_size;
+
+        let scanned_size = self.snapshot.as_ref().map(|s| s.root.size()).unwrap_or(0);
+        let not_scanned = total_drive.saturating_sub(free_drive).saturating_sub(scanned_size);
+
+        let safe_size: u64 = self
+            .findings
+            .iter()
+            .filter(|f| f.risk == rules::Risk::SafeToRemove)
+            .map(|f| f.size)
+            .sum();
+        let safe_count = self
+            .findings
+            .iter()
+            .filter(|f| f.risk == rules::Risk::SafeToRemove)
+            .count();
+
+        let review_size: u64 = self
+            .findings
+            .iter()
+            .filter(|f| f.risk == rules::Risk::NeedsReview)
+            .map(|f| f.size)
+            .sum();
+        let review_count = self
+            .findings
+            .iter()
+            .filter(|f| f.risk == rules::Risk::NeedsReview)
+            .count();
+
+        ui.horizontal(|ui| {
+            let card_w = (ui.available_width() - 36.0) / 4.0;
+            let card_h = 76.0;
+
+            // 卡片 1: Free after cleanup
+            Self::stat_card(
+                ui,
+                card_w,
+                card_h,
+                "Free after cleanup",
+                &human_size(free_after),
+                Some((format!("+{}", human_size(selected_size)), egui::Color32::from_rgb(0x16, 0xA3, 0x4A))),
+                None,
+            );
+
+            // 卡片 2: Safe to remove
+            Self::stat_card(
+                ui,
+                card_w,
+                card_h,
+                "● Safe to remove",
+                &human_size(safe_size),
+                None,
+                Some(format!("{safe_count} items")),
+            );
+
+            // 卡片 3: Needs review
+            Self::stat_card(
+                ui,
+                card_w,
+                card_h,
+                "● Needs review",
+                &human_size(review_size),
+                None,
+                Some(format!("{review_count} items")),
+            );
+
+            // 卡片 4: Not scanned
+            Self::stat_card(
+                ui,
+                card_w,
+                card_h,
+                "Not scanned",
+                &human_size(not_scanned),
+                None,
+                Some("system & apps".to_string()),
+            );
+        });
+    }
+
+    fn stat_card(
+        ui: &mut egui::Ui,
+        w: f32,
+        h: f32,
+        title: &str,
+        main_val: &str,
+        badge: Option<(String, egui::Color32)>,
+        sub_label: Option<String>,
+    ) {
+        egui::Frame::group(ui.style())
+            .fill(egui::Color32::WHITE)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0xE5, 0xE7, 0xEB)))
+            .corner_radius(8.0)
+            .inner_margin(egui::Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.set_width(w);
+                ui.set_height(h);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        if title.starts_with("● Safe") {
+                            ui.label(
+                                egui::RichText::new(title)
+                                    .small()
+                                    .color(egui::Color32::from_rgb(0x16, 0xA3, 0x4A)),
+                            );
+                        } else if title.starts_with("● Needs") {
+                            ui.label(
+                                egui::RichText::new(title)
+                                    .small()
+                                    .color(egui::Color32::from_rgb(0xD9, 0x77, 0x06)),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new(title)
+                                    .small()
+                                    .color(egui::Color32::from_rgb(0x6B, 0x72, 0x80)),
+                            );
+                        }
+                    });
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(main_val)
+                                .font(egui::FontId::proportional(22.0))
+                                .strong()
+                                .color(egui::Color32::from_rgb(0x11, 0x18, 0x27)),
+                        );
+                        if let Some((b_text, b_color)) = badge {
+                            ui.label(egui::RichText::new(b_text).strong().color(b_color));
+                        }
+                        if let Some(sub) = sub_label {
+                            ui.label(
+                                egui::RichText::new(sub)
+                                    .small()
+                                    .color(egui::Color32::from_rgb(0x6B, 0x72, 0x80)),
+                            );
+                        }
+                    });
+                });
+            });
+    }
+
+    /// Treemap 渲染 + 面包屑导航 + 下钻点击
+    fn treemap_section(&mut self, ui: &mut egui::Ui) {
+        let Some(snapshot) = &self.snapshot else {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("等待首次扫描…").color(egui::Color32::GRAY));
+            });
             return;
         };
-        let available = ui.available_rect_before_wrap();
-        let painter = ui.painter();
 
+        let curr_node = self.get_current_node(snapshot);
+        let scanner::Node::Dir { children, size: curr_size, .. } = curr_node else {
+            ui.label("当前节点不是目录");
+            return;
+        };
+
+        // 1. 面包屑与操作栏
+        ui.horizontal(|ui| {
+            if ui.button(egui::RichText::new("~ Home").strong()).clicked() {
+                self.current_path.clear();
+            }
+            let mut pop_to = None;
+            for (idx, seg) in self.current_path.iter().enumerate() {
+                ui.label("/");
+                if ui.button(seg).clicked() {
+                    pop_to = Some(idx + 1);
+                }
+            }
+            if let Some(len) = pop_to {
+                self.current_path.truncate(len);
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(human_size(*curr_size)).color(egui::Color32::GRAY));
+                ui.separator();
+                ui.label(egui::RichText::new("Explorer").strong());
+            });
+        });
+        ui.add_space(4.0);
+
+        // 2. Treemap 主绘制区
+        let bottom_legend_h = 32.0;
+        let available = egui::Rect::from_min_size(
+            ui.cursor().min,
+            egui::vec2(ui.available_width(), (ui.available_height() - bottom_legend_h).max(100.0)),
+        );
+
+        let painter = ui.painter();
         let sizes: Vec<u64> = children.iter().map(|c| c.size()).collect();
         let rects = layout::treemap_layout(
             &sizes,
@@ -157,46 +371,96 @@ impl App {
             ),
         );
 
+        let mut clicked_dir = None;
+
         for (child, r) in children.iter().zip(rects.iter()) {
-            if r.w < 1.0 || r.h < 1.0 {
+            if r.w < 2.0 || r.h < 2.0 {
                 continue;
             }
             let rect = egui::Rect::from_min_size(
                 egui::pos2(r.x as f32, r.y as f32),
                 egui::vec2(r.w as f32, r.h as f32),
             );
-            // #01 占位单色；#03 换语义类目着色
-            painter.rect_filled(
-                rect.shrink(1.0),
-                4.0,
-                egui::Color32::from_rgb(0x5B, 0x6E, 0xEE),
-            );
-            painter.rect_stroke(
-                rect.shrink(1.0),
-                4.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(0xC8, 0xD2, 0xFF)),
-                egui::StrokeKind::Inside,
-            );
-            if rect.width() > 70.0 && rect.height() > 34.0 {
+
+            // 语义类目着色
+            let (is_dir, kids) = match child {
+                scanner::Node::Dir { children, .. } => (true, Some(children.as_slice())),
+                scanner::Node::File { .. } => (false, None),
+            };
+            let cat = category::classify_node(child.name(), is_dir, kids);
+            let (fill, stroke) = category_colors(cat);
+
+            // 点击响应（仅目录可下钻）
+            let id = ui.make_persistent_id(format!("tile_{}", child.name()));
+            let response = ui.interact(rect, id, egui::Sense::click());
+            if response.clicked() && is_dir {
+                clicked_dir = Some(child.name().to_string());
+            }
+
+            let hovered = response.hovered();
+            let final_stroke = if hovered {
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(0x3B, 0x82, 0xF6))
+            } else {
+                egui::Stroke::new(1.0, stroke)
+            };
+
+            painter.rect_filled(rect.shrink(1.0), 4.0, fill);
+            painter.rect_stroke(rect.shrink(1.0), 4.0, final_stroke, egui::StrokeKind::Inside);
+
+            // 瓦片文本标注
+            if rect.width() > 60.0 && rect.height() > 32.0 {
                 let inner = rect.shrink2(egui::vec2(4.0, 4.0));
                 painter.text(
                     inner.left_top() + egui::vec2(2.0, 2.0),
                     egui::Align2::LEFT_TOP,
                     child.name(),
-                    egui::FontId::proportional(13.0),
-                    egui::Color32::WHITE,
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(0x1F, 0x29, 0x37),
                 );
-                painter.text(
-                    inner.left_bottom() - egui::vec2(0.0, 6.0),
-                    egui::Align2::LEFT_BOTTOM,
-                    human_size(child.size()),
-                    egui::FontId::proportional(16.0),
-                    egui::Color32::from_rgb(0xE8, 0xEC, 0xFF),
-                );
+                if rect.height() > 46.0 {
+                    painter.text(
+                        inner.left_bottom() - egui::vec2(0.0, 4.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        human_size(child.size()),
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::from_rgb(0x4B, 0x55, 0x63),
+                    );
+                }
             }
         }
-        // 占住空间，避免 egui 认为中心面板为空
+
+        if let Some(dir) = clicked_dir {
+            self.current_path.push(dir);
+        }
+
         ui.allocate_rect(available, egui::Sense::hover());
+
+        // 3. 底部类目图例（对齐参考截图）
+        ui.add_space(6.0);
+        Self::bottom_legend(ui);
+    }
+
+    /// 底部语义类目图例
+    fn bottom_legend(ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            let items = [
+                ("Documents & media", rules::Category::DocumentMedia),
+                ("Dev tools & other", rules::Category::DevToolOther),
+                ("Code projects", rules::Category::CodeProject),
+                ("iOS & Android SDKs", rules::Category::Sdk),
+                ("AI models", rules::Category::AiModel),
+                ("Package caches", rules::Category::PackageCache),
+            ];
+
+            for (label, cat) in items {
+                let (fill, stroke) = category_colors(cat);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, fill);
+                ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+                ui.label(egui::RichText::new(label).small().color(egui::Color32::from_rgb(0x4B, 0x55, 0x63)));
+                ui.add_space(8.0);
+            }
+        });
     }
 
     fn recommendations_panel(&mut self, ui: &mut egui::Ui) {
@@ -232,7 +496,6 @@ impl App {
         });
         ui.add_space(4.0);
 
-        // 底部固定的导出区域计算高度，其余滚动
         let bottom_height = 80.0;
         let scroll_height = (ui.available_height() - bottom_height).max(100.0);
 
@@ -244,6 +507,9 @@ impl App {
                     for (i, finding) in self.findings.iter().enumerate() {
                         let mut is_checked = self.selected_indices.contains(&i);
                         egui::Frame::group(ui.style())
+                            .fill(egui::Color32::WHITE)
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0xE5, 0xE7, 0xEB)))
+                            .corner_radius(6.0)
                             .inner_margin(8.0)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
@@ -264,13 +530,13 @@ impl App {
                                         rules::Risk::SafeToRemove => {
                                             ui.label(
                                                 egui::RichText::new("● Safe to remove")
-                                                    .color(egui::Color32::from_rgb(0x22, 0xC5, 0x5E)),
+                                                    .color(egui::Color32::from_rgb(0x16, 0xA3, 0x4A)),
                                             );
                                         }
                                         rules::Risk::NeedsReview => {
                                             ui.label(
                                                 egui::RichText::new("● Needs review")
-                                                    .color(egui::Color32::from_rgb(0xF5, 0x9E, 0x0B)),
+                                                    .color(egui::Color32::from_rgb(0xD9, 0x77, 0x06)),
                                             );
                                         }
                                     }
@@ -279,9 +545,9 @@ impl App {
                                 ui.label(
                                     egui::RichText::new(finding.path.to_string_lossy())
                                         .small()
-                                        .color(egui::Color32::DARK_GRAY),
+                                        .color(egui::Color32::from_rgb(0x6B, 0x72, 0x80)),
                                 );
-                                ui.label(egui::RichText::new(&finding.reason).small());
+                                ui.label(egui::RichText::new(&finding.reason).small().color(egui::Color32::from_rgb(0x4B, 0x55, 0x63)));
                             });
                         ui.add_space(6.0);
                     }
@@ -327,7 +593,8 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll_scan();
 
-        egui::Panel::top("top_bar").show(ui, |ui| {
+        // 顶栏 1：控制与状态行
+        egui::Panel::top("control_bar").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading("DiskCleaner");
@@ -339,17 +606,6 @@ impl eframe::App for App {
                         self.start_scan();
                     }
                 });
-
-                // 统计指标：Free after cleanup 联动展示
-                let selected_size = self.selected_total_size();
-                ui.separator();
-                ui.label("Free after cleanup:");
-                ui.label(
-                    egui::RichText::new(format!("+{}", human_size(selected_size)))
-                        .strong()
-                        .color(egui::Color32::from_rgb(0x22, 0xC5, 0x5E)),
-                );
-                ui.separator();
 
                 match (&self.state, &self.snapshot) {
                     (ScanState::Scanning { started, progress }, _) => {
@@ -381,28 +637,80 @@ impl eframe::App for App {
                 if let Some((t, msg)) = &self.toast {
                     if t.elapsed().as_secs() < 4 {
                         ui.separator();
-                        ui.colored_label(egui::Color32::from_rgb(0x22, 0xC5, 0x5E), format!("✓ {msg}"));
+                        ui.colored_label(egui::Color32::from_rgb(0x16, 0xA3, 0x4A), format!("✓ {msg}"));
                     }
                 }
             });
+            ui.add_space(4.0);
+        });
+
+        // 顶栏 2：四张大统计卡（参考截图）
+        egui::Panel::top("stats_bar").show(ui, |ui| {
+            ui.add_space(6.0);
+            self.top_stats_bar(ui);
             ui.add_space(6.0);
         });
 
+        // 右侧建议面板
         egui::Panel::right("recommendations_panel")
             .exact_size(360.0)
             .show(ui, |ui| {
                 self.recommendations_panel(ui);
             });
 
-        egui::CentralPanel::default().show(ui, |ui| match &self.snapshot {
-            Some(snap) => Self::treemap(ui, snap),
-            None => {
-                ui.centered_and_justified(|ui| ui.label("等待首次扫描…"));
-            }
+        // 中心面板：Treemap 与钻取
+        egui::CentralPanel::default().show(ui, |ui| {
+            egui::Frame::group(ui.style())
+                .fill(egui::Color32::WHITE)
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0xE5, 0xE7, 0xEB)))
+                .corner_radius(8.0)
+                .inner_margin(12.0)
+                .show(ui, |ui| {
+                    self.treemap_section(ui);
+                });
         });
+
         ctx.request_repaint_after(std::time::Duration::from_millis(
             if matches!(self.state, ScanState::Scanning { .. }) { 200 } else { 1000 },
         ));
+    }
+}
+
+/// 语义类目对应的粉彩柔和配色 (填充色, 边框色)
+fn category_colors(cat: rules::Category) -> (egui::Color32, egui::Color32) {
+    match cat {
+        rules::Category::CodeProject => (
+            egui::Color32::from_rgb(0xDE, 0xE4, 0xFD), // 柔和蓝紫
+            egui::Color32::from_rgb(0xA5, 0xB4, 0xFC),
+        ),
+        rules::Category::AiModel => (
+            egui::Color32::from_rgb(0xFD, 0xDE, 0xE9), // 柔和粉红
+            egui::Color32::from_rgb(0xF4, 0x72, 0xB6),
+        ),
+        rules::Category::PackageCache => (
+            egui::Color32::from_rgb(0xD1, 0xFA, 0xE5), // 柔和薄荷绿
+            egui::Color32::from_rgb(0x34, 0xD3, 0x99),
+        ),
+        rules::Category::Sdk => (
+            egui::Color32::from_rgb(0xCF, 0xFA, 0xFE), // 柔和青天蓝
+            egui::Color32::from_rgb(0x38, 0xBD, 0xF8),
+        ),
+        rules::Category::DocumentMedia => (
+            egui::Color32::from_rgb(0xFF, 0xED, 0xD5), // 柔和浅桃橙
+            egui::Color32::from_rgb(0xFB, 0x92, 0x3C),
+        ),
+        rules::Category::DevToolOther => (
+            egui::Color32::from_rgb(0xF1, 0xF5, 0xF9), // 柔和冷灰
+            egui::Color32::from_rgb(0x94, 0xA3, 0xB8),
+        ),
+        rules::Category::BuildArtifact => (
+            egui::Color32::from_rgb(0xFE, 0xF3, 0xC7), // 柔和浅金黄
+            egui::Color32::from_rgb(0xFB, 0xBF, 0x24),
+        ),
+        rules::Category::Other => (
+            egui::Color32::from_rgb(0xF8, 0xFA, 0xFC), // 极淡灰
+            egui::Color32::from_rgb(0xCB, 0xD5, 0xE1),
+        ),
     }
 }
 

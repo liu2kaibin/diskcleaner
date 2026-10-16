@@ -52,6 +52,14 @@ fn scanner_aggregates_nested_directory_sizes() {
     assert_eq!(inner.size(), 350);
 }
 
+#[test]
+fn test_get_disk_free_space_returns_valid_numbers_on_windows() {
+    if let Some((total, free)) = scanner::get_disk_free_space("C:\\") {
+        assert!(total > 0, "总空间应大于0");
+        assert!(total >= free, "总空间应大于等于可用空间");
+    }
+}
+
 /// ADR-0004 性能预算守护：用户目录全扫 <60s（普通权限）。
 /// 平时 #[ignore]，验收时 cargo test --release -- --ignored 手动跑。
 #[test]
