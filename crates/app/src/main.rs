@@ -1,11 +1,12 @@
-//! DiskCleaner —— 开发者视角的 Windows 磁盘清理工具（#01 骨架 + #02 规则建议列表）。
+//! DiskCleaner —— 开发者视角的 Windows 磁盘清理工具（#01 骨架 + #02 规则建议 + #04 脚本生成闭环）。
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Instant;
 
-use diskcleaner_core::{layout, rules, scanner};
+use diskcleaner_core::{layout, rules, scanner, script};
 use eframe::egui;
 
 fn main() -> eframe::Result {
@@ -58,9 +59,12 @@ enum ScanState {
 struct App {
     snapshot: Option<scanner::Snapshot>,
     findings: Vec<rules::Finding>,
+    selected_indices: HashSet<usize>,
+    script_config: script::ScriptConfig,
     state: ScanState,
     receiver: Option<Receiver<scanner::Snapshot>>,
     scan_error: Option<String>,
+    toast: Option<(Instant, String)>,
 }
 
 impl App {
@@ -68,9 +72,12 @@ impl App {
         let mut app = Self {
             snapshot: None,
             findings: Vec::new(),
+            selected_indices: HashSet::new(),
+            script_config: script::ScriptConfig::default(),
             state: ScanState::Idle,
             receiver: None,
             scan_error: None,
+            toast: None,
         };
         app.start_scan();
         app
@@ -84,6 +91,7 @@ impl App {
         self.receiver = Some(rx);
         self.scan_error = None;
         self.findings.clear();
+        self.selected_indices.clear();
         self.state = ScanState::Scanning { started: Instant::now(), progress };
         std::thread::spawn(move || {
             let snap = scanner::scan_with_progress(std::path::Path::new(&root), &progress_worker);
@@ -97,7 +105,17 @@ impl App {
                 Ok(snap) => {
                     let resolver = rules::PathResolver::new(&rules::SystemEnv);
                     let rule_set = rules::default_rules();
-                    self.findings = rules::evaluate_rules(&snap, &resolver, &rule_set);
+                    let findings = rules::evaluate_rules(&snap, &resolver, &rule_set);
+
+                    // 默认自动勾选全部 Safe to remove 建议项
+                    self.selected_indices.clear();
+                    for (i, f) in findings.iter().enumerate() {
+                        if f.risk == rules::Risk::SafeToRemove {
+                            self.selected_indices.insert(i);
+                        }
+                    }
+
+                    self.findings = findings;
                     self.snapshot = Some(snap);
                     self.state = ScanState::Idle;
                     self.receiver = None;
@@ -110,6 +128,14 @@ impl App {
                 }
             }
         }
+    }
+
+    fn selected_total_size(&self) -> u64 {
+        self.selected_indices
+            .iter()
+            .filter_map(|&idx| self.findings.get(idx))
+            .map(|f| f.size)
+            .sum()
     }
 
     fn treemap(ui: &mut egui::Ui, snapshot: &scanner::Snapshot) {
@@ -190,44 +216,109 @@ impl App {
             return;
         }
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for finding in &self.findings {
-                egui::Frame::group(ui.style())
-                    .inner_margin(8.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.strong(&finding.title);
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.strong(human_size(finding.size));
-                            });
-                        });
-                        ui.horizontal(|ui| {
-                            match finding.risk {
-                                rules::Risk::SafeToRemove => {
-                                    ui.label(
-                                        egui::RichText::new("● Safe to remove")
-                                            .color(egui::Color32::from_rgb(0x22, 0xC5, 0x5E)),
-                                    );
-                                }
-                                rules::Risk::NeedsReview => {
-                                    ui.label(
-                                        egui::RichText::new("● Needs review")
-                                            .color(egui::Color32::from_rgb(0xF5, 0x9E, 0x0B)),
-                                    );
-                                }
-                            }
-                        });
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new(finding.path.to_string_lossy())
-                                .small()
-                                .color(egui::Color32::DARK_GRAY),
-                        );
-                        ui.label(egui::RichText::new(&finding.reason).small());
-                    });
-                ui.add_space(6.0);
+        // 快捷勾选工具栏
+        ui.horizontal(|ui| {
+            if ui.button("Select safe (仅安全项)").clicked() {
+                self.selected_indices.clear();
+                for (i, f) in self.findings.iter().enumerate() {
+                    if f.risk == rules::Risk::SafeToRemove {
+                        self.selected_indices.insert(i);
+                    }
+                }
+            }
+            if ui.button("清空已选").clicked() {
+                self.selected_indices.clear();
             }
         });
+        ui.add_space(4.0);
+
+        // 底部固定的导出区域计算高度，其余滚动
+        let bottom_height = 80.0;
+        let scroll_height = (ui.available_height() - bottom_height).max(100.0);
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), scroll_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (i, finding) in self.findings.iter().enumerate() {
+                        let mut is_checked = self.selected_indices.contains(&i);
+                        egui::Frame::group(ui.style())
+                            .inner_margin(8.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.checkbox(&mut is_checked, "").changed() {
+                                        if is_checked {
+                                            self.selected_indices.insert(i);
+                                        } else {
+                                            self.selected_indices.remove(&i);
+                                        }
+                                    }
+                                    ui.strong(&finding.title);
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.strong(human_size(finding.size));
+                                    });
+                                });
+                                ui.horizontal(|ui| {
+                                    match finding.risk {
+                                        rules::Risk::SafeToRemove => {
+                                            ui.label(
+                                                egui::RichText::new("● Safe to remove")
+                                                    .color(egui::Color32::from_rgb(0x22, 0xC5, 0x5E)),
+                                            );
+                                        }
+                                        rules::Risk::NeedsReview => {
+                                            ui.label(
+                                                egui::RichText::new("● Needs review")
+                                                    .color(egui::Color32::from_rgb(0xF5, 0x9E, 0x0B)),
+                                            );
+                                        }
+                                    }
+                                });
+                                ui.add_space(2.0);
+                                ui.label(
+                                    egui::RichText::new(finding.path.to_string_lossy())
+                                        .small()
+                                        .color(egui::Color32::DARK_GRAY),
+                                );
+                                ui.label(egui::RichText::new(&finding.reason).small());
+                            });
+                        ui.add_space(6.0);
+                    }
+                });
+            },
+        );
+
+        ui.separator();
+        let selected_size = self.selected_total_size();
+        let selected_count = self.selected_indices.len();
+
+        ui.horizontal(|ui| {
+            ui.label(format!("已选中 {} 项，共 {}", selected_count, human_size(selected_size)));
+        });
+
+        ui.add_space(2.0);
+        let copy_btn = ui.add_sized(
+            [ui.available_width(), 32.0],
+            egui::Button::new(
+                egui::RichText::new("📋 Copy cleanup script (复制清理脚本)")
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            )
+            .fill(egui::Color32::from_rgb(0x25, 0x63, 0xEB)),
+        );
+
+        if copy_btn.clicked() {
+            let selected_items: Vec<&rules::Finding> = self
+                .selected_indices
+                .iter()
+                .filter_map(|&idx| self.findings.get(idx))
+                .collect();
+
+            let ps_script = script::generate_cleanup_script(&selected_items, &self.script_config);
+            ui.ctx().copy_text(ps_script);
+            self.toast = Some((Instant::now(), "清理脚本已复制到剪贴板！".to_string()));
+        }
     }
 }
 
@@ -248,6 +339,17 @@ impl eframe::App for App {
                         self.start_scan();
                     }
                 });
+
+                // 统计指标：Free after cleanup 联动展示
+                let selected_size = self.selected_total_size();
+                ui.separator();
+                ui.label("Free after cleanup:");
+                ui.label(
+                    egui::RichText::new(format!("+{}", human_size(selected_size)))
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x22, 0xC5, 0x5E)),
+                );
+                ui.separator();
 
                 match (&self.state, &self.snapshot) {
                     (ScanState::Scanning { started, progress }, _) => {
@@ -274,12 +376,20 @@ impl eframe::App for App {
                 if let Some(err) = &self.scan_error {
                     ui.colored_label(egui::Color32::RED, err);
                 }
+
+                // Toast 提示条
+                if let Some((t, msg)) = &self.toast {
+                    if t.elapsed().as_secs() < 4 {
+                        ui.separator();
+                        ui.colored_label(egui::Color32::from_rgb(0x22, 0xC5, 0x5E), format!("✓ {msg}"));
+                    }
+                }
             });
             ui.add_space(6.0);
         });
 
         egui::Panel::right("recommendations_panel")
-            .exact_size(320.0)
+            .exact_size(360.0)
             .show(ui, |ui| {
                 self.recommendations_panel(ui);
             });

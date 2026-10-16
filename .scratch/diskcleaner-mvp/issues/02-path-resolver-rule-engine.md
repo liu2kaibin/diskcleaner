@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] 合成 fixture 上 npm cache 规则给出正确分级结论（命中/未命中、大小、类目）
 - [x] Path Resolver 从环境变量/工具配置解析出缓存真实位置（npm_config_cache / NPM_CONFIG_CACHE / LOCALAPPDATA / USERPROFILE）
