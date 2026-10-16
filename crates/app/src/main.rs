@@ -540,6 +540,29 @@ impl App {
                                             );
                                         }
                                     }
+                                    match &finding.action {
+                                        rules::Action::CustomCommand { .. } => {
+                                            ui.label(
+                                                egui::RichText::new("⚡ 维护压缩命令")
+                                                    .small()
+                                                    .color(egui::Color32::from_rgb(0x25, 0x63, 0xEB)),
+                                            );
+                                        }
+                                        rules::Action::DirectDelete => {
+                                            ui.label(
+                                                egui::RichText::new("直删白名单")
+                                                    .small()
+                                                    .color(egui::Color32::from_rgb(0x05, 0x96, 0x69)),
+                                            );
+                                        }
+                                        rules::Action::MoveToTrash => {
+                                            ui.label(
+                                                egui::RichText::new("进回收目录")
+                                                    .small()
+                                                    .color(egui::Color32::from_rgb(0x4B, 0x55, 0x63)),
+                                            );
+                                        }
+                                    }
                                 });
                                 ui.add_space(2.0);
                                 ui.label(

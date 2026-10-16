@@ -5,6 +5,11 @@ use crate::rules::{Category, Finding, Risk};
 use crate::script::{generate_cleanup_script, ScriptConfig};
 
 fn sample_finding(rule_id: &str, path: &str, size: u64, risk: Risk) -> Finding {
+    let action = if rule_id == "npm-cache" {
+        crate::rules::Action::DirectDelete
+    } else {
+        crate::rules::Action::MoveToTrash
+    };
     Finding {
         rule_id: rule_id.to_string(),
         title: format!("Test {rule_id}"),
@@ -12,6 +17,7 @@ fn sample_finding(rule_id: &str, path: &str, size: u64, risk: Risk) -> Finding {
         size,
         risk,
         category: Category::PackageCache,
+        action,
         reason: "Test reason".to_string(),
     }
 }
@@ -44,8 +50,7 @@ fn script_direct_delete_for_whitelisted_rules() {
 #[test]
 fn script_move_to_recovery_directory_for_non_whitelisted() {
     let f = sample_finding("android-sdk", "C:\\Users\\admin\\AppData\\Local\\Android", 1000, Risk::NeedsReview);
-    let mut config = ScriptConfig::default();
-    config.direct_delete_rules.clear(); // 确保不走直删
+    let config = ScriptConfig::default();
 
     let script = generate_cleanup_script(&[&f], &config);
 
@@ -73,15 +78,25 @@ fn script_threshold_confirmation_injected_when_exceeding_threshold() {
 }
 
 #[test]
-fn script_no_threshold_confirmation_when_below_threshold() {
-    let small_size = 10 * 1024 * 1024 * 1024; // 10 GB < 50 GB
-    let f = sample_finding("small-cache", "C:\\temp\\small", small_size, Risk::SafeToRemove);
+fn script_generates_custom_command_for_docker_or_wsl() {
+    let f = Finding {
+        rule_id: "docker-wsl-vhdx".to_string(),
+        title: "Docker 虚拟磁盘".to_string(),
+        path: PathBuf::from("C:\\Users\\admin\\AppData\\Local\\Docker\\wsl\\data\\ext4.vhdx"),
+        size: 15 * 1024 * 1024 * 1024,
+        risk: Risk::NeedsReview,
+        category: Category::DevToolOther,
+        action: crate::rules::Action::CustomCommand {
+            command: "docker system prune -a --volumes -f".to_string(),
+            description: "清理 Docker 未使用镜像容器与卷".to_string(),
+        },
+        reason: "虚拟磁盘不可直接删除".to_string(),
+    };
 
-    let config = ScriptConfig::default(); // 阈值 50GB
+    let config = ScriptConfig::default();
     let script = generate_cleanup_script(&[&f], &config);
 
-    assert!(
-        !script.contains("Read-Host"),
-        "未超过阈值时不应生成阻断确认门"
-    );
+    assert!(script.contains("docker system prune -a --volumes -f"), "脚本应输出自定义压缩清理命令");
+    assert!(!script.contains("Remove-Item"), "CustomCommand 绝不可生成 Remove-Item 指令");
+    assert!(!script.contains("Move-Item"), "CustomCommand 绝不可生成 Move-Item 指令");
 }

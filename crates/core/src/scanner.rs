@@ -11,8 +11,8 @@ use jwalk::{Parallelism, WalkDirGeneric};
 /// 快照树节点。目录的 size 为子树聚合值。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
-    File { name: String, size: u64 },
-    Dir { name: String, size: u64, children: Vec<Node> },
+    File { name: String, size: u64, mtime: u64 },
+    Dir { name: String, size: u64, mtime: u64, children: Vec<Node> },
 }
 
 impl Node {
@@ -27,6 +27,29 @@ impl Node {
         match self {
             Node::File { name, .. } | Node::Dir { name, .. } => name,
         }
+    }
+
+    pub fn mtime(&self) -> u64 {
+        match self {
+            Node::File { mtime, .. } | Node::Dir { mtime, .. } => *mtime,
+        }
+    }
+
+    pub fn file(name: impl Into<String>, size: u64) -> Self {
+        Node::File { name: name.into(), size, mtime: 0 }
+    }
+
+    pub fn file_with_mtime(name: impl Into<String>, size: u64, mtime: u64) -> Self {
+        Node::File { name: name.into(), size, mtime }
+    }
+
+    pub fn dir(name: impl Into<String>, size: u64, children: Vec<Node>) -> Self {
+        let mtime = children.iter().map(|c| c.mtime()).max().unwrap_or(0);
+        Node::Dir { name: name.into(), size, mtime, children }
+    }
+
+    pub fn dir_with_mtime(name: impl Into<String>, size: u64, mtime: u64, children: Vec<Node>) -> Self {
+        Node::Dir { name: name.into(), size, mtime, children }
     }
 }
 
@@ -116,17 +139,26 @@ pub fn scan_with_progress(root: &Path, visited: &AtomicU64) -> Snapshot {
 
     // 扁平收集：父路径 -> 子节点原始信息。
     // metadata 在 process_read_dir 回调里预读——该回调在 rayon 并行池中执行，
-    // 否则几十万次 stat 在消费循环里单线程串行（实测 77.6s → 预算 60s 的瓶颈）。
+    // 预读 size 与 mtime，不产生二次 stat。
     let mut raw: HashMap<PathBuf, Vec<RawNode>> = HashMap::new();
-    for entry in WalkDirGeneric::<((), Option<u64>)>::new(root)
+    for entry in WalkDirGeneric::<((), Option<(u64, u64)>)>::new(root)
         .follow_links(false)
         .parallelism(Parallelism::RayonNewPool(16))
         .process_read_dir(|_, _, _, results| {
             results.iter_mut().for_each(|r| {
                 if let Ok(e) = r {
-                    if !e.file_type.is_dir() {
-                        e.client_state = Some(e.metadata().map(|m| m.len()).unwrap_or(0));
-                    }
+                    let (size, mtime) = if let Ok(m) = e.metadata() {
+                        let len = if e.file_type.is_dir() { 0 } else { m.len() };
+                        let mt = m.modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        (len, mt)
+                    } else {
+                        (0, 0)
+                    };
+                    e.client_state = Some((size, mtime));
                 }
             })
         })
@@ -137,10 +169,12 @@ pub fn scan_with_progress(root: &Path, visited: &AtomicU64) -> Snapshot {
                     continue;
                 }
                 visited.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let (size, mtime) = e.client_state.unwrap_or((0, 0));
                 raw.entry(e.parent_path.to_path_buf()).or_default().push(RawNode {
                     name: e.file_name().to_string_lossy().into_owned(),
                     is_dir: e.file_type.is_dir(),
-                    size: e.client_state.unwrap_or(0),
+                    size,
+                    mtime,
                 });
             }
             Err(_) => skipped += 1,
@@ -165,11 +199,13 @@ struct RawNode {
     name: String,
     is_dir: bool,
     size: u64,
+    mtime: u64,
 }
 
-/// 从扁平映射递归装配子树，聚合目录大小。consume raw 避免克隆。
+/// 从扁平映射递归装配子树，聚合目录大小与最新修改时间。consume raw 避免克隆。
 fn build_node(dir: &Path, raw: &mut HashMap<PathBuf, Vec<RawNode>>, name: String) -> Node {
     let mut size = 0u64;
+    let mut mtime = 0u64;
     let mut children = Vec::new();
     if let Some(list) = raw.remove(dir) {
         for c in list {
@@ -177,12 +213,14 @@ fn build_node(dir: &Path, raw: &mut HashMap<PathBuf, Vec<RawNode>>, name: String
                 let child_path = dir.join(&c.name);
                 let node = build_node(&child_path, raw, c.name);
                 size += node.size();
+                mtime = mtime.max(node.mtime());
                 children.push(node);
             } else {
                 size += c.size;
-                children.push(Node::File { name: c.name, size: c.size });
+                mtime = mtime.max(c.mtime);
+                children.push(Node::File { name: c.name, size: c.size, mtime: c.mtime });
             }
         }
     }
-    Node::Dir { name, size, children }
+    Node::Dir { name, size, mtime, children }
 }

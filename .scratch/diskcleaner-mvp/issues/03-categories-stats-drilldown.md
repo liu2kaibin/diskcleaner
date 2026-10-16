@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 02
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] treemap 按语义类目着色，底部图例与参考截图结构一致（粉彩柔和配色：代码蓝紫、AI粉红、缓存薄荷绿、SDK青蓝、媒体桃橙、开发工具冷灰；底部图例完全对齐）
 - [x] 四统计卡数字与 treemap / 规则结论一致（Free after cleanup / Safe to remove / Needs review / Not scanned 动态汇总）

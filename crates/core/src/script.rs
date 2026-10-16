@@ -77,8 +77,11 @@ pub fn generate_cleanup_script(items: &[&Finding], config: &ScriptConfig) -> Str
     out.push_str("Write-Host '----------------------------------------'\n");
 
     for item in items {
-        let is_direct = config.direct_delete_rules.contains(&item.rule_id);
-        let action_tag = if is_direct { "[直删白名单]" } else { "[移入回收目录]" };
+        let action_tag = match &item.action {
+            crate::rules::Action::DirectDelete => "[直删白名单]",
+            crate::rules::Action::MoveToTrash => "[移入回收目录]",
+            crate::rules::Action::CustomCommand { .. } => "[执行维护命令]",
+        };
         out.push_str(&format!(
             "Write-Host ' * {action_tag} {} ({}): {}'\n",
             item.title,
@@ -107,27 +110,31 @@ pub fn generate_cleanup_script(items: &[&Finding], config: &ScriptConfig) -> Str
     out.push_str("# --- 执行清理命令 ---\n");
     for item in items {
         let path_str = item.path.to_string_lossy();
-        let is_direct = config.direct_delete_rules.contains(&item.rule_id);
-
-        if is_direct {
-            out.push_str(&format!("Write-Host '正在直接删除: {path_str} ...'\n"));
-            out.push_str(&format!(
-                "if (Test-Path -LiteralPath '{path_str}') {{\n    Remove-Item -LiteralPath '{path_str}' -Recurse -Force -ErrorAction Continue\n}}\n"
-            ));
-        } else {
-            let vol_root = extract_volume_root(&item.path);
-            let trash_dir = format!("{vol_root}{}", config.trash_dir_name);
-            out.push_str(&format!(
-                "Write-Host '正在移入所在卷回收目录: {path_str} -> {trash_dir} ...'\n"
-            ));
-            out.push_str(&format!(
-                "if (!(Test-Path -LiteralPath '{trash_dir}')) {{\n    New-Item -ItemType Directory -Path '{trash_dir}' -Force | Out-Null\n}}\n"
-            ));
-            out.push_str(&format!(
-                "if (Test-Path -LiteralPath '{path_str}') {{\n    Move-Item -LiteralPath '{path_str}' -Destination '{trash_dir}' -Force -ErrorAction Continue\n}}\n"
-            ));
+        match &item.action {
+            crate::rules::Action::DirectDelete => {
+                out.push_str(&format!("Write-Host '正在直接删除: {path_str} ...'\n"));
+                out.push_str(&format!(
+                    "if (Test-Path -LiteralPath '{path_str}') {{\n    Remove-Item -LiteralPath '{path_str}' -Recurse -Force -ErrorAction Continue\n}}\n\n"
+                ));
+            }
+            crate::rules::Action::MoveToTrash => {
+                let vol_root = extract_volume_root(&item.path);
+                let trash_dir = format!("{vol_root}{}", config.trash_dir_name);
+                out.push_str(&format!(
+                    "Write-Host '正在移入所在卷回收目录: {path_str} -> {trash_dir} ...'\n"
+                ));
+                out.push_str(&format!(
+                    "if (!(Test-Path -LiteralPath '{trash_dir}')) {{\n    New-Item -ItemType Directory -Path '{trash_dir}' -Force | Out-Null\n}}\n"
+                ));
+                out.push_str(&format!(
+                    "if (Test-Path -LiteralPath '{path_str}') {{\n    Move-Item -LiteralPath '{path_str}' -Destination '{trash_dir}' -Force -ErrorAction Continue\n}}\n\n"
+                ));
+            }
+            crate::rules::Action::CustomCommand { command, description } => {
+                out.push_str(&format!("Write-Host '正在执行维护命令 [{description}]:'\n"));
+                out.push_str(&format!("{command}\n\n"));
+            }
         }
-        out.push('\n');
     }
 
     out.push_str("Write-Host '========================================' -ForegroundColor Green\n");

@@ -40,13 +40,13 @@ fn classify_documents_and_media() {
 fn classify_code_projects_by_markers() {
     // 目录包含 Cargo.toml 或 package.json 等特征文件
     let children = vec![
-        Node::File { name: "Cargo.toml".to_string(), size: 100 },
-        Node::Dir { name: "src".to_string(), size: 500, children: vec![] },
+        Node::file("Cargo.toml", 100),
+        Node::dir("src", 500, vec![]),
     ];
     assert_eq!(classify_node("my-app", true, Some(&children)), Category::CodeProject);
 
     let js_children = vec![
-        Node::File { name: "package.json".to_string(), size: 100 },
+        Node::file("package.json", 100),
     ];
     assert_eq!(classify_node("web-client", true, Some(&js_children)), Category::CodeProject);
 }
