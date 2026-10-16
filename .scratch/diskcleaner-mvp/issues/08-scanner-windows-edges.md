@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] 四类边界各有真实文件系统集成用例（覆盖超长路径、Junction 环、OneDrive 占位属性只读、受限权限跳过计数）
 - [x] junction 不重复计入也不死循环（mklink /J 环状链接测试通过，follow_links=false 确保不二次钻取）

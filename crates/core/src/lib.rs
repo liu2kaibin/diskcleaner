@@ -3,6 +3,7 @@ pub mod layout;
 pub mod rules;
 pub mod scanner;
 pub mod script;
+pub mod settings;
 pub mod store;
 
 #[cfg(test)]
@@ -15,5 +16,7 @@ mod rules_tests;
 mod scanner_tests;
 #[cfg(test)]
 mod script_tests;
+#[cfg(test)]
+mod settings_tests;
 #[cfg(test)]
 mod store_tests;

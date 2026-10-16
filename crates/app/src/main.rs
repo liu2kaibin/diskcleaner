@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Instant;
 
-use diskcleaner_core::{category, layout, rules, scanner, script, store};
+use diskcleaner_core::{category, layout, rules, scanner, script, settings, store};
 use eframe::egui;
 
 fn main() -> eframe::Result {
@@ -88,6 +88,10 @@ struct App {
     /// 视图模式（Treemap 概览 vs Downloads 专项审阅）
     view_mode: ViewMode,
     download_sort: DownloadSort,
+    /// 用户偏好设置
+    settings: settings::AppSettings,
+    show_settings: bool,
+    expired_trash: Vec<settings::ExpiredTrashItem>,
 }
 
 impl App {
@@ -119,12 +123,27 @@ impl App {
 
         let needs_initial_scan = init_snap.is_none();
 
+        let loaded_settings = settings::load_settings(&settings::default_settings_path());
+        let mut script_cfg = script::ScriptConfig::default();
+        script_cfg.confirmation_threshold = loaded_settings.confirmation_threshold_gb * 1024 * 1024 * 1024;
+        script_cfg.direct_delete_rules = loaded_settings.direct_delete_whitelist.clone();
+
+        let trash_dirs = vec![
+            std::path::PathBuf::from("C:\\.diskcleaner-trash"),
+            std::path::PathBuf::from("D:\\.diskcleaner-trash"),
+        ];
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let expired_trash = settings::scan_expired_trash(&trash_dirs, loaded_settings.trash_retention_days, now_secs);
+
         let mut app = Self {
             snapshot: init_snap,
             findings: init_findings,
             selected_indices: init_selected,
             expanded_indices: HashSet::new(),
-            script_config: script::ScriptConfig::default(),
+            script_config: script_cfg,
             state: ScanState::Idle,
             receiver: None,
             scan_error: None,
@@ -133,6 +152,9 @@ impl App {
             drive_stats,
             view_mode: ViewMode::Treemap,
             download_sort: DownloadSort::SizeDesc,
+            settings: loaded_settings,
+            show_settings: false,
+            expired_trash,
         };
 
         if needs_initial_scan {
@@ -1009,6 +1031,21 @@ impl eframe::App for App {
                     ui.colored_label(egui::Color32::RED, err);
                 }
 
+                // 期满回收目录提醒
+                if !self.expired_trash.is_empty() {
+                    let exp_size: u64 = self.expired_trash.iter().map(|i| i.size).sum();
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0xD9, 0x77, 0x06),
+                        format!("⚠️ 回收目录已积压 {} 项（共 {}）超过 {} 天", self.expired_trash.len(), human_size(exp_size), self.settings.trash_retention_days),
+                    );
+                    if ui.button("清空期满项").clicked() {
+                        let purge_script = settings::generate_purge_trash_script(&self.expired_trash);
+                        ui.ctx().copy_text(purge_script);
+                        self.toast = Some((Instant::now(), "清空回收目录脚本已复制到剪贴板！".to_string()));
+                    }
+                }
+
                 // Toast 提示条
                 if let Some((t, msg)) = &self.toast {
                     if t.elapsed().as_secs() < 4 {
@@ -1016,6 +1053,12 @@ impl eframe::App for App {
                         ui.colored_label(egui::Color32::from_rgb(0x16, 0xA3, 0x4A), format!("✓ {msg}"));
                     }
                 }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⚙ 设置").clicked() {
+                        self.show_settings = !self.show_settings;
+                    }
+                });
             });
             ui.add_space(4.0);
         });
@@ -1046,6 +1089,94 @@ impl eframe::App for App {
                     ViewMode::Downloads => self.downloads_view(ui),
                 });
         });
+
+        // 设置弹窗
+        if self.show_settings {
+            egui::Window::new("⚙ 偏好设置")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(&ctx, |ui| {
+                    ui.set_width(460.0);
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("回收目录保留期:");
+                        ui.add(egui::Slider::new(&mut self.settings.trash_retention_days, 1..=90).suffix(" 天"));
+                    });
+                    ui.label(egui::RichText::new("存放超过该天数的移入项将提示彻底清空").small().color(egui::Color32::GRAY));
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("二次确认安全阈值:");
+                        ui.add(egui::Slider::new(&mut self.settings.confirmation_threshold_gb, 10..=200).suffix(" GB"));
+                    });
+                    ui.label(egui::RichText::new("单次清理脚本释放空间超出此阈值时强制输入 'YES' 确认").small().color(egui::Color32::GRAY));
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("闲置项目判定天数:");
+                        ui.add(egui::Slider::new(&mut self.settings.idle_project_days, 30..=365).suffix(" 天"));
+                    });
+                    ui.label(egui::RichText::new("项目超过此天数无代码改动时，其 node_modules 视为闲置").small().color(egui::Color32::GRAY));
+                    ui.add_space(10.0);
+
+                    ui.separator();
+                    ui.label(egui::RichText::new("直删白名单规则（勾选则直接删除，不产生二次搬运）:").strong());
+                    ui.add_space(4.0);
+
+                    let candidates = [
+                        ("npm-cache", "npm 依赖包缓存"),
+                        ("pip-cache", "Python pip 包缓存"),
+                        ("uv-cache", "Python uv 虚拟环境缓存"),
+                        ("cargo-registry", "Rust Cargo Crates 源码索引"),
+                        ("gradle-maven-cache", "Java Gradle / Maven 依赖包"),
+                        ("user-temp", "Windows 用户级临时目录 (Temp)"),
+                        ("build-artifacts", "代码项目构建产物 (target/build/dist)"),
+                        ("thumbnail-cache", "Windows 缩略图缓存 (thumbcache)"),
+                    ];
+
+                    for (r_id, desc) in candidates {
+                        let mut checked = self.settings.direct_delete_whitelist.contains(r_id);
+                        if ui.checkbox(&mut checked, format!("{desc} ({r_id})")).changed() {
+                            if checked {
+                                self.settings.direct_delete_whitelist.insert(r_id.to_string());
+                            } else {
+                                self.settings.direct_delete_whitelist.remove(r_id);
+                            }
+                        }
+                    }
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        let save_btn = ui.add_sized(
+                            [120.0, 30.0],
+                            egui::Button::new(
+                                egui::RichText::new("保存并生效")
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(0x16, 0xA3, 0x4A))
+                            .corner_radius(6.0),
+                        );
+
+                        if save_btn.clicked() {
+                            let _ = settings::save_settings(&self.settings, &settings::default_settings_path());
+                            self.script_config.confirmation_threshold = self.settings.confirmation_threshold_gb * 1024 * 1024 * 1024;
+                            self.script_config.direct_delete_rules = self.settings.direct_delete_whitelist.clone();
+                            self.show_settings = false;
+                            self.toast = Some((Instant::now(), "设置已保存并即时生效！".to_string()));
+                        }
+
+                        if ui.button("关闭").clicked() {
+                            self.show_settings = false;
+                        }
+                    });
+                });
+        }
 
         ctx.request_repaint_after(std::time::Duration::from_millis(
             if matches!(self.state, ScanState::Scanning { .. }) { 200 } else { 1000 },
