@@ -1,0 +1,8 @@
+[package]
+name = "diskcleaner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+diskcleaner-core = { path = "../core" }
+eframe = "0.37.0"

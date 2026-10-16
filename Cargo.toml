@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/app"]
+
+# 本机只有 8GB 内存：dev 构建砍掉调试信息，否则 rustc 峰值内存直接把机器打进换页（2026-10-16 实测）。
+[profile.dev]
+debug = 0
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"

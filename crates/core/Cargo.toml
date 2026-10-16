@@ -1,0 +1,10 @@
+[package]
+name = "diskcleaner-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jwalk = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
