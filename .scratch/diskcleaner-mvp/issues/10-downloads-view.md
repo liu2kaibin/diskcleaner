@@ -4,7 +4,7 @@
 
 **Blocked by:** 05
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] 两组列表（陈旧文件/旧安装包）按大小与时间排序（分组为 🕒 超过 180 天未动大文件 与 📦 超过 90 天历史安装包，支持“按容量大小 ↓”与“按时间排序”）
 - [x] 逐项勾选联动 Cleanup Script 与统计卡（点击复选框即时联动顶部 Free after cleanup 增量、右侧面板与 Copy script 输出）
