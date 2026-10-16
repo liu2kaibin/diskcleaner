@@ -4,7 +4,7 @@
 
 **Blocked by:** 02, 04
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] 15 条规则各有命中/未命中 fixture 用例（28/28 测试通过，覆盖全量 15 条规范规则）
 - [x] AI 模型逐模型出结论，含名称/大小/最后使用时间（支持 Ollama 与 HuggingFace models-- 逐个解析）

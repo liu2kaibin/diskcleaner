@@ -1,5 +1,5 @@
 //! DiskCleaner —— 开发者视角的 Windows 磁盘清理工具
-//! #01 骨架 + #02 规则建议 + #04 脚本生成闭环 + #03 语义类目着色、顶部四统计卡、treemap钻取
+//! #01 骨架 + #02 规则建议 + #04 脚本生成闭环 + #03 语义类目与统计卡 + #06 推荐面板完整交互对齐
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -63,6 +63,7 @@ struct App {
     snapshot: Option<scanner::Snapshot>,
     findings: Vec<rules::Finding>,
     selected_indices: HashSet<usize>,
+    expanded_indices: HashSet<usize>,
     script_config: script::ScriptConfig,
     state: ScanState,
     receiver: Option<Receiver<scanner::Snapshot>>,
@@ -81,6 +82,7 @@ impl App {
             snapshot: None,
             findings: Vec::new(),
             selected_indices: HashSet::new(),
+            expanded_indices: HashSet::new(),
             script_config: script::ScriptConfig::default(),
             state: ScanState::Idle,
             receiver: None,
@@ -102,6 +104,7 @@ impl App {
         self.scan_error = None;
         self.findings.clear();
         self.selected_indices.clear();
+        self.expanded_indices.clear();
         self.current_path.clear();
         self.drive_stats = scanner::get_disk_free_space("C:\\");
         self.state = ScanState::Scanning { started: Instant::now(), progress };
@@ -463,26 +466,128 @@ impl App {
         });
     }
 
+    /// 右侧 Recommendations 面板：完整对齐截图交互与布局
     fn recommendations_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.heading("Recommendations");
-            ui.label(egui::RichText::new("清理建议").color(egui::Color32::GRAY));
-        });
-        ui.separator();
+        ui.heading("Recommendations");
+        ui.label(
+            egui::RichText::new("Select items to build a cleanup script")
+                .small()
+                .color(egui::Color32::from_rgb(0x6B, 0x72, 0x80)),
+        );
+        ui.add_space(8.0);
 
         if self.findings.is_empty() {
             if matches!(self.state, ScanState::Scanning { .. }) {
-                ui.label("正在扫描计算中…");
+                ui.label("正在扫描计算建议项…");
             } else {
-                ui.label("暂未发现匹配建议项 (npm cache 未在扫描范围)");
+                ui.label("未在扫描范围内发现清理建议项");
             }
             return;
         }
 
-        // 快捷勾选工具栏
+        // 分组统计：Safe to remove 与 Review first (仅存下标)
+        let safe_indices: Vec<usize> = self
+            .findings
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.risk == rules::Risk::SafeToRemove)
+            .map(|(i, _)| i)
+            .collect();
+        let safe_total: u64 = safe_indices.iter().map(|&i| self.findings[i].size).sum();
+
+        let review_indices: Vec<usize> = self
+            .findings
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.risk == rules::Risk::NeedsReview)
+            .map(|(i, _)| i)
+            .collect();
+        let review_total: u64 = review_indices.iter().map(|&i| self.findings[i].size).sum();
+
+        let bottom_height = 86.0;
+        let scroll_height = (ui.available_height() - bottom_height).max(120.0);
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), scroll_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    // 分组 1: Safe to remove
+                    if !safe_indices.is_empty() {
+                        Self::section_header(
+                            ui,
+                            "Safe to remove",
+                            egui::Color32::from_rgb(0xDC, 0xFC, 0xE7),
+                            egui::Color32::from_rgb(0x16, 0xA3, 0x4A),
+                            &human_size(safe_total),
+                        );
+                        ui.add_space(4.0);
+
+                        for &idx in &safe_indices {
+                            let finding = &self.findings[idx];
+                            Self::render_finding_row(
+                                ui,
+                                &mut self.selected_indices,
+                                &mut self.expanded_indices,
+                                idx,
+                                finding,
+                            );
+                        }
+                        ui.add_space(10.0);
+                    }
+
+                    // 分组 2: Review first
+                    if !review_indices.is_empty() {
+                        Self::section_header(
+                            ui,
+                            "Review first",
+                            egui::Color32::from_rgb(0xFE, 0xF3, 0xC7),
+                            egui::Color32::from_rgb(0xD9, 0x77, 0x06),
+                            &human_size(review_total),
+                        );
+                        ui.add_space(4.0);
+
+                        for &idx in &review_indices {
+                            let finding = &self.findings[idx];
+                            Self::render_finding_row(
+                                ui,
+                                &mut self.selected_indices,
+                                &mut self.expanded_indices,
+                                idx,
+                                finding,
+                            );
+                        }
+                    }
+                });
+            },
+        );
+
+        ui.separator();
+
+        // 底部操作区：对齐参考截图
+        let selected_size = self.selected_total_size();
+        let selected_count = self.selected_indices.len();
+
+        ui.label(
+            egui::RichText::new(format!("{} selected · {} items", human_size(selected_size), selected_count))
+                .strong()
+                .color(egui::Color32::from_rgb(0x37, 0x41, 0x51)),
+        );
+        ui.add_space(4.0);
+
         ui.horizontal(|ui| {
-            if ui.button("Select safe (仅安全项)").clicked() {
+            // [Select safe] 按钮
+            let select_safe_btn = ui.add_sized(
+                [110.0, 32.0],
+                egui::Button::new(
+                    egui::RichText::new("Select safe")
+                        .color(egui::Color32::from_rgb(0x1F, 0x29, 0x37)),
+                )
+                .fill(egui::Color32::WHITE)
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0xD1, 0xD5, 0xDB))),
+            );
+            if select_safe_btn.clicked() {
                 self.selected_indices.clear();
                 for (i, f) in self.findings.iter().enumerate() {
                     if f.risk == rules::Risk::SafeToRemove {
@@ -490,124 +595,137 @@ impl App {
                     }
                 }
             }
-            if ui.button("清空已选").clicked() {
-                self.selected_indices.clear();
+
+            ui.add_space(4.0);
+
+            // [Copy script] 主操作按钮（深黑色胶囊底）
+            let copy_btn = ui.add_sized(
+                [ui.available_width(), 32.0],
+                egui::Button::new(
+                    egui::RichText::new("Copy script")
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(0x18, 0x18, 0x1B))
+                .corner_radius(6.0),
+            );
+
+            if copy_btn.clicked() {
+                let selected_items: Vec<&rules::Finding> = self
+                    .selected_indices
+                    .iter()
+                    .filter_map(|&idx| self.findings.get(idx))
+                    .collect();
+
+                let ps_script = script::generate_cleanup_script(&selected_items, &self.script_config);
+                ui.ctx().copy_text(ps_script);
+                self.toast = Some((Instant::now(), "清理脚本已复制到剪贴板！".to_string()));
             }
         });
-        ui.add_space(4.0);
+    }
 
-        let bottom_height = 80.0;
-        let scroll_height = (ui.available_height() - bottom_height).max(100.0);
-
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), scroll_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (i, finding) in self.findings.iter().enumerate() {
-                        let mut is_checked = self.selected_indices.contains(&i);
-                        egui::Frame::group(ui.style())
-                            .fill(egui::Color32::WHITE)
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0xE5, 0xE7, 0xEB)))
-                            .corner_radius(6.0)
-                            .inner_margin(8.0)
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    if ui.checkbox(&mut is_checked, "").changed() {
-                                        if is_checked {
-                                            self.selected_indices.insert(i);
-                                        } else {
-                                            self.selected_indices.remove(&i);
-                                        }
-                                    }
-                                    ui.strong(&finding.title);
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.strong(human_size(finding.size));
-                                    });
-                                });
-                                ui.horizontal(|ui| {
-                                    match finding.risk {
-                                        rules::Risk::SafeToRemove => {
-                                            ui.label(
-                                                egui::RichText::new("● Safe to remove")
-                                                    .color(egui::Color32::from_rgb(0x16, 0xA3, 0x4A)),
-                                            );
-                                        }
-                                        rules::Risk::NeedsReview => {
-                                            ui.label(
-                                                egui::RichText::new("● Needs review")
-                                                    .color(egui::Color32::from_rgb(0xD9, 0x77, 0x06)),
-                                            );
-                                        }
-                                    }
-                                    match &finding.action {
-                                        rules::Action::CustomCommand { .. } => {
-                                            ui.label(
-                                                egui::RichText::new("⚡ 维护压缩命令")
-                                                    .small()
-                                                    .color(egui::Color32::from_rgb(0x25, 0x63, 0xEB)),
-                                            );
-                                        }
-                                        rules::Action::DirectDelete => {
-                                            ui.label(
-                                                egui::RichText::new("直删白名单")
-                                                    .small()
-                                                    .color(egui::Color32::from_rgb(0x05, 0x96, 0x69)),
-                                            );
-                                        }
-                                        rules::Action::MoveToTrash => {
-                                            ui.label(
-                                                egui::RichText::new("进回收目录")
-                                                    .small()
-                                                    .color(egui::Color32::from_rgb(0x4B, 0x55, 0x63)),
-                                            );
-                                        }
-                                    }
-                                });
-                                ui.add_space(2.0);
-                                ui.label(
-                                    egui::RichText::new(finding.path.to_string_lossy())
-                                        .small()
-                                        .color(egui::Color32::from_rgb(0x6B, 0x72, 0x80)),
-                                );
-                                ui.label(egui::RichText::new(&finding.reason).small().color(egui::Color32::from_rgb(0x4B, 0x55, 0x63)));
-                            });
-                        ui.add_space(6.0);
-                    }
-                });
-            },
-        );
-
-        ui.separator();
-        let selected_size = self.selected_total_size();
-        let selected_count = self.selected_indices.len();
-
+    /// 分组小标题栏（胶囊 badge + 右侧容量）
+    fn section_header(ui: &mut egui::Ui, title: &str, bg_color: egui::Color32, text_color: egui::Color32, total_str: &str) {
         ui.horizontal(|ui| {
-            ui.label(format!("已选中 {} 项，共 {}", selected_count, human_size(selected_size)));
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(100.0, 20.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 4.0, bg_color);
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                title,
+                egui::FontId::proportional(11.0),
+                text_color,
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(total_str)
+                        .small()
+                        .color(egui::Color32::from_rgb(0x6B, 0x72, 0x80)),
+                );
+            });
         });
+    }
 
-        ui.add_space(2.0);
-        let copy_btn = ui.add_sized(
-            [ui.available_width(), 32.0],
-            egui::Button::new(
-                egui::RichText::new("📋 Copy cleanup script (复制清理脚本)")
-                    .strong()
-                    .color(egui::Color32::WHITE),
-            )
-            .fill(egui::Color32::from_rgb(0x25, 0x63, 0xEB)),
-        );
+    /// 单行建议项渲染（对齐截图结构：Checkbox | 标题 + 缩略路径 | 容量 + 展开箭头）
+    fn render_finding_row(
+        ui: &mut egui::Ui,
+        selected_indices: &mut HashSet<usize>,
+        expanded_indices: &mut HashSet<usize>,
+        idx: usize,
+        finding: &rules::Finding,
+    ) {
+        let is_expanded = expanded_indices.contains(&idx);
+        let mut is_checked = selected_indices.contains(&idx);
 
-        if copy_btn.clicked() {
-            let selected_items: Vec<&rules::Finding> = self
-                .selected_indices
-                .iter()
-                .filter_map(|&idx| self.findings.get(idx))
-                .collect();
+        egui::Frame::group(ui.style())
+            .fill(egui::Color32::WHITE)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0xF3, 0xF4, 0xF6)))
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut is_checked, "").changed() {
+                        if is_checked {
+                            selected_indices.insert(idx);
+                        } else {
+                            selected_indices.remove(&idx);
+                        }
+                    }
 
-            let ps_script = script::generate_cleanup_script(&selected_items, &self.script_config);
-            ui.ctx().copy_text(ps_script);
-            self.toast = Some((Instant::now(), "清理脚本已复制到剪贴板！".to_string()));
-        }
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(&finding.title)
+                                .strong()
+                                .color(egui::Color32::from_rgb(0x11, 0x18, 0x27)),
+                        );
+                        ui.label(
+                            egui::RichText::new(format_display_path(&finding.path))
+                                .small()
+                                .color(egui::Color32::from_rgb(0x9C, 0xA3, 0xAF)),
+                        );
+                    });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let arrow = if is_expanded { "v" } else { ">" };
+                        if ui.button(egui::RichText::new(arrow).color(egui::Color32::GRAY)).clicked() {
+                            if is_expanded {
+                                expanded_indices.remove(&idx);
+                            } else {
+                                expanded_indices.insert(idx);
+                            }
+                        }
+                        ui.label(
+                            egui::RichText::new(human_size(finding.size))
+                                .strong()
+                                .color(egui::Color32::from_rgb(0x1F, 0x29, 0x37)),
+                        );
+                    });
+                });
+
+                // 点击展开展示详细原因与动作
+                if is_expanded {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        match &finding.action {
+                            rules::Action::CustomCommand { command, description } => {
+                                ui.colored_label(egui::Color32::from_rgb(0x25, 0x63, 0xEB), "⚡ 维护压缩命令");
+                                ui.label(egui::RichText::new(format!("{description}: `{command}`")).small());
+                            }
+                            rules::Action::DirectDelete => {
+                                ui.colored_label(egui::Color32::from_rgb(0x16, 0xA3, 0x4A), "✓ 直删白名单");
+                                ui.label(egui::RichText::new(&finding.reason).small());
+                            }
+                            rules::Action::MoveToTrash => {
+                                ui.colored_label(egui::Color32::from_rgb(0x6B, 0x72, 0x80), "📁 移入回收目录");
+                                ui.label(egui::RichText::new(&finding.reason).small());
+                            }
+                        }
+                    });
+                }
+            });
+        ui.add_space(3.0);
     }
 }
 
@@ -674,9 +792,9 @@ impl eframe::App for App {
             ui.add_space(6.0);
         });
 
-        // 右侧建议面板
+        // 右侧建议面板（宽度设为 380px，留出舒适的边距）
         egui::Panel::right("recommendations_panel")
-            .exact_size(360.0)
+            .exact_size(380.0)
             .show(ui, |ui| {
                 self.recommendations_panel(ui);
             });
@@ -697,6 +815,17 @@ impl eframe::App for App {
             if matches!(self.state, ScanState::Scanning { .. }) { 200 } else { 1000 },
         ));
     }
+}
+
+/// 路径缩写显示（将 USERPROFILE 替换为 ~，对齐原型截图）
+fn format_display_path(path: &Path) -> String {
+    if let Ok(user) = std::env::var("USERPROFILE") {
+        let user_path = Path::new(&user);
+        if let Ok(rel) = path.strip_prefix(user_path) {
+            return format!("~\\{}", rel.display());
+        }
+    }
+    path.to_string_lossy().into_owned()
 }
 
 /// 语义类目对应的粉彩柔和配色 (填充色, 边框色)
